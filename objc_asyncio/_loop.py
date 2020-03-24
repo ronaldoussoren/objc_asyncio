@@ -1,20 +1,31 @@
 __all__ = "EventLoop"
 
 import asyncio
+import heapq
 import socket
 import subprocess
-import time
 
 from Cocoa import (
+    CFAbsoluteTimeGetCurrent,
+    CFRunLoopAddTimer,
     CFRunLoopGetCurrent,
+    CFRunLoopPerformBlock,
     CFRunLoopRun,
     CFRunLoopStop,
-    NSRunLoop,
-    NSRunLoopCommonModes,
-    NSTimer,
+    CFRunLoopTimerCreateWithHandler,
+    CFRunLoopTimerGetNextFireDate,
+    CFRunLoopTimerSetNextFireDate,
+    kCFRunLoopCommonModes,
 )
 
 _unset = object()
+
+
+def _handle_callback(handle):
+    if handle.cancelled():
+        return
+
+    handle._run()
 
 
 class EventLoop:
@@ -33,6 +44,8 @@ class EventLoop:
         self._thread = None
         self._running = False
         self._closed = False
+        self._timer = None
+        self._timer_q = []
 
         self._task_factory = None
         self._executor = None
@@ -48,17 +61,6 @@ class EventLoop:
         return future.result()
 
     def run_forever(self):
-        def function():
-            print("hello")
-
-        def function2(a):
-            print("timer", a)
-
-        timer = NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
-            1.0, True, function2
-        )
-        NSRunLoop.currentRunLoop().performBlock_(function)
-        NSRunLoop.currentRunLoop().addTimer_forMode_(timer, NSRunLoopCommonModes)
         try:
             self._running = True
             CFRunLoopRun()
@@ -84,9 +86,6 @@ class EventLoop:
         if self._closed:
             return
 
-        if self._executor is not None:
-            self._executor.shutdown()
-
         ...
 
     def shutdown_asyncgens(self):
@@ -95,21 +94,49 @@ class EventLoop:
     # Scheduling callbacks
 
     def call_soon(self, callback, *args, context=None):
-        ...
+        handle = asyncio.Handle(callback, args, self, context)
+        CFRunLoopPerformBlock(
+            self._loop, kCFRunLoopCommonModes, lambda: _handle_callback(handle)
+        )
+        return handle
 
-    def call_soon_thread_safe(self):
-        ...
+    def call_soon_thread_safe(self, callback, *args, context=None):
+        handle = asyncio.Handle(callback, args, self, context)
+        CFRunLoopPerformBlock(
+            self._loop, kCFRunLoopCommonModes, lambda: _handle_callback(handle)
+        )
+        return handle
 
     # Scheduling delayed callbacks
 
     def call_later(self, delay, callback, *args, context=None):
-        ...
+        return self.call_at(self.time() + delay, callback, *args, context=context)
+
+    def _process_timer(self):
+        while self._timer_q and self._timer_q[0].when() <= self.time():
+            handle = heapq.heappop(self._timer_q)
+            _handle_callback(handle)
+
+        if self._timer_q:
+            CFRunLoopTimerSetNextFireDate(self._timer, self._timer_q[0].when())
 
     def call_at(self, when, callback, *args, context=None):
-        ...
+        if self._timer is None:
+            self._timer = CFRunLoopTimerCreateWithHandler(
+                None, when, 1000.0, 0, 0, lambda timer: self._process_timer()
+            )
+            CFRunLoopAddTimer(self._loop, self._timer, kCFRunLoopCommonModes)
+
+        handle = asyncio.TimerHandle(when, callback, args, self, context=context)
+        heapq.heappush(self._timer_q, handle)
+
+        if CFRunLoopTimerGetNextFireDate(self._timer) > self._timer_q[0].when():
+            CFRunLoopTimerSetNextFireDate(self._timer, self._timer_q[0].when())
 
     def time(self):
-        return time.monotonic()
+        # XXX: This is wrong, CFAbsoluteTimeGetCurrent has a different epoch
+        # than time.time.
+        return CFAbsoluteTimeGetCurrent()
 
     # Creating Futures and Tasks
     def create_future(self):
