@@ -1,0 +1,17 @@
+build
+dist
+.DS_Store
+__pycache__
+htmlcov
+.coverage
+workenv
+.mypy_cache
+
+syntax: glob
+*.so
+*.egg-info
+*.dSYM
+*.pyc
+*.pyo
+*.orig
+*.swp
