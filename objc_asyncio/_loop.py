@@ -8,9 +8,12 @@ import sys
 
 from Cocoa import (
     CFAbsoluteTimeGetCurrent,
+    CFRunLoopAddObserver,
     CFRunLoopAddTimer,
     CFRunLoopGetCurrent,
+    CFRunLoopObserverCreateWithHandler,
     CFRunLoopPerformBlock,
+    CFRunLoopRemoveObserver,
     CFRunLoopRemoveTimer,
     CFRunLoopRun,
     CFRunLoopStop,
@@ -20,6 +23,8 @@ from Cocoa import (
     CFRunLoopTimerSetNextFireDate,
     CFRunLoopWakeUp,
     kCFRunLoopCommonModes,
+    kCFRunLoopEntry,
+    kCFRunLoopExit,
 )
 
 _unset = object()
@@ -56,6 +61,15 @@ class EventLoop(asyncio.AbstractEventLoop):
 
     def __init__(self):
         self._loop = CFRunLoopGetCurrent()
+
+        # Add a runloop observer to detect if the loop is active to ensure
+        # the EventLoop is running when the CFRunLoop is active, even if
+        # it is started by other code.
+        self._observer = CFRunLoopObserverCreateWithHandler(
+            None, kCFRunLoopEntry | kCFRunLoopExit, True, 0, self._observer_loop
+        )
+        CFRunLoopAddObserver(self._loop, self._observer, kCFRunLoopCommonModes)
+
         self._thread = None
         self._running = False
         self._closed = False
@@ -66,6 +80,19 @@ class EventLoop(asyncio.AbstractEventLoop):
         self._executor = None
         self._exception_handler = None
         self._debug = False  # XXX
+
+    def __del__(self):
+        if self._observer is not None:
+            CFRunLoopRemoveObserver(self._loop, self._observer, kCFRunLoopCommonModes)
+
+    def _observer_loop(self, observer, activity):
+        if activity == kCFRunLoopEntry:
+            self._running = True
+            asyncio._set_running_loop(self)
+
+        elif activity == kCFRunLoopExit:
+            self._running = False
+            asyncio._set_running_loop(None)
 
     # Running and stopping the loop
 
@@ -88,12 +115,8 @@ class EventLoop(asyncio.AbstractEventLoop):
             finalizer=self._asyncgen_finalizer_hook,
         )
         try:
-            self._running = True
-            asyncio._set_running_loop(self)
             CFRunLoopRun()
         finally:
-            self._running = False
-            asyncio._set_running_loop(None)
             sys.set_asyncgen_hooks(*old_agen_hooks)
 
     def stop(self):
@@ -225,7 +248,6 @@ class EventLoop(asyncio.AbstractEventLoop):
         happy_eyeballs_delay=None,
         interleave=None
     ):
-
         raise NotImplementedError(2)
 
     async def create_datagram_endpoint(
