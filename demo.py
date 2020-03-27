@@ -1,24 +1,13 @@
 import asyncio
-from asyncio import futures
 
 from objc_asyncio import _loop as loop
 
 
-async def sleep(delay, result=None):
-    future = el.create_future()
-    h = el.call_later(delay, futures._set_result_unless_cancelled, future, result)
-    try:
-        value = await future
-        return value
-    finally:
-        h.cancel()
-
-
 async def printer():
     print("******* start")
-    await sleep(1)
+    await asyncio.sleep(1)
     print("******* middle")
-    await sleep(1)
+    await asyncio.sleep(1)
     print("******* end")
 
 

@@ -89,9 +89,11 @@ class EventLoop(asyncio.AbstractEventLoop):
         )
         try:
             self._running = True
+            asyncio._set_running_loop(self)
             CFRunLoopRun()
         finally:
             self._running = False
+            asyncio._set_running_loop(None)
             sys.set_asyncgen_hooks(*old_agen_hooks)
 
     def stop(self):
