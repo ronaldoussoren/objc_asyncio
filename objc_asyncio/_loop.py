@@ -2,6 +2,7 @@ __all__ = "EventLoop"
 
 import asyncio
 import heapq
+import os
 import socket
 import subprocess
 import sys
@@ -79,7 +80,12 @@ class EventLoop(asyncio.AbstractEventLoop):
         self._task_factory = None
         self._executor = None
         self._exception_handler = None
-        self._debug = False  # XXX
+
+        # This mirrors how asyncio detects debug mode
+        self._debug = sys.flags.dev_mode or (
+            not sys.flags.ignore_environment
+            and bool(os.environ.get("PYTHONASYNCIODEBUG"))
+        )
 
     def __del__(self):
         if self._observer is not None:
