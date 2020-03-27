@@ -28,6 +28,8 @@ from Cocoa import (
     kCFRunLoopExit,
 )
 
+from ._selector import RunLoopSelector
+
 _unset = object()
 _POSIX_TO_CFTIME = 978307200
 
@@ -70,6 +72,8 @@ class EventLoop(asyncio.AbstractEventLoop):
             None, kCFRunLoopEntry | kCFRunLoopExit, True, 0, self._observer_loop
         )
         CFRunLoopAddObserver(self._loop, self._observer, kCFRunLoopCommonModes)
+
+        self._selector = RunLoopSelector(self)
 
         self._thread = None
         self._running = False
@@ -153,6 +157,8 @@ class EventLoop(asyncio.AbstractEventLoop):
             CFRunLoopTimerInvalidate(self._timer)
             self._timer = None
 
+        self._selector.close()
+        self._selector = None
         self._closed = True
 
     def shutdown_asyncgens(self):
@@ -458,3 +464,6 @@ class EventLoop(asyncio.AbstractEventLoop):
     def _timer_handle_cancelled(self, handle):
         if handle._scheduled:
             self._timer_cancelled_count += 1
+
+    def _io_event(self, event, key):
+        raise NotImplementedError(29)

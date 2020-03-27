@@ -1,6 +1,6 @@
 import asyncio
 
-from objc_asyncio import _loop as loop
+from objc_asyncio import EventLoop
 
 
 async def printer():
@@ -18,7 +18,7 @@ async def main():
     el.stop()
 
 
-el = loop.EventLoop()
+el = EventLoop()
 asyncio.set_event_loop(el)
 # el.call_soon(lambda a: print(a), "hello world")
 # el.call_later(1.0, lambda: print("timer 1"))
