@@ -16,8 +16,13 @@ from Cocoa import (
     CFSocketCreateRunLoopSource,
     CFSocketCreateWithNative,
     CFSocketDisableCallBacks,
+    CFSocketEnableCallBacks,
     kCFRunLoopCommonModes,
+    kCFSocketAcceptCallBack,
+    kCFSocketConnectCallBack,
     kCFSocketNoCallBack,
+    kCFSocketReadCallBack,
+    kCFSocketWriteCallBack,
 )
 
 SelectorKey = namedtuple(
@@ -25,9 +30,16 @@ SelectorKey = namedtuple(
 )
 
 
+ALL_EVENTS = (
+    kCFSocketReadCallBack
+    | kCFSocketAcceptCallBack
+    | kCFSocketConnectCallBack
+    | kCFSocketWriteCallBack
+)
+
+
 def _valid_events(events):
-    # XXX
-    return True
+    return (events != 0) and ((events & ALL_EVENTS) == events)
 
 
 def _fileobj_to_fd(fileobj):
@@ -73,11 +85,11 @@ class RunLoopSelector:
         self._eventloop._io_event(event, self._fd_to_key[fd])
 
     def _set_events(self, cfsock, old_events, new_events):
-        CFSocketDisableCallBacks(old_events)
-        CFSocketDisableCallBacks(new_events)
+        CFSocketDisableCallBacks(cfsock, old_events)
+        CFSocketEnableCallBacks(cfsock, new_events)
 
     def register(self, fileobj, events, data=None):
-        if _valid_events(events):
+        if not _valid_events(events):
             raise ValueError(f"Invalid events: {events}")
 
         fd = self._fileobj_lookup(fileobj)
@@ -88,7 +100,7 @@ class RunLoopSelector:
             None, fd, kCFSocketNoCallBack, self._callout, fd
         )
         cfsource = CFSocketCreateRunLoopSource(None, cfsock, 0)
-        CFRunLoopAddSource(self._eventloop._runloop, cfsource, kCFRunLoopCommonModes)
+        CFRunLoopAddSource(self._eventloop._loop, cfsource, kCFRunLoopCommonModes)
 
         key = SelectorKey(
             fileobj, self._fileobj_lookup(fileobj), events, data, cfsock, cfsource
@@ -105,7 +117,7 @@ class RunLoopSelector:
             raise KeyError(f"{fileobj} is not registered") from None
 
         CFRunLoopRemoveSource(
-            self._eventloop._runloop, key.cfsource, kCFRunLoopCommonModes
+            self._eventloop._loop, key.cfsource, kCFRunLoopCommonModes
         )
         return key
 
