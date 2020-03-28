@@ -6,6 +6,7 @@ htmlcov
 .coverage
 workenv
 .mypy_cache
+.tox
 
 syntax: glob
 *.so
