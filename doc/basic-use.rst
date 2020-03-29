@@ -6,14 +6,16 @@ In command-line scripts
 
 Call objc_asyncio.install() before calling asyncio.run() or manually creating an asyncio event loop:
 
-.. source-code:: python
+.. code-block:: python
+   :linenos:
 
     import asyncio
     import objc_asyncio
 
+
     async def main():
-        # Main entry-point.
         ...
+
 
     objc_asyncio.install()
     asyncio.run(main())
@@ -26,7 +28,8 @@ In GUI's
 Call objc_asyncio.install() before starting the main GUI:
 
 
-.. source-code:: python
+.. code-block:: python
+   :linenos:
 
     import sys
     import Cocoa

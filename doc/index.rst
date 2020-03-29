@@ -13,7 +13,7 @@ using :mod:`asyncio` in Cocoa GUIs easier.
 Release information
 -------------------
 
-Objectgraph 0.1 is not yet released. See the :doc:`changelog <changelog>`
+Objc_asyncio 0.1 is not yet released. See the :doc:`changelog <changelog>`
 for information on this release.
 
 
@@ -33,7 +33,7 @@ Using objc_asyncio
 ------------------
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
 
    basic-use
    api-reference
@@ -42,7 +42,7 @@ Development
 -----------
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
 
    license
    changelog
