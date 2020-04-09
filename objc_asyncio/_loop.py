@@ -2,12 +2,15 @@ __all__ = "EventLoop"
 
 import asyncio
 import concurrent.futures
+import functools
 import heapq
 import os
 import signal
 import socket
+import ssl
 import subprocess
 import sys
+import weakref
 from asyncio.unix_events import _UnixSubprocessTransport
 
 from Cocoa import (
@@ -29,15 +32,22 @@ from Cocoa import (
     kCFRunLoopCommonModes,
     kCFRunLoopEntry,
     kCFRunLoopExit,
+    kCFSocketReadCallBack,
+    kCFSocketWriteCallBack,
 )
 
 from ._debug import traceexceptions
 from ._log import logger
-from ._selector import RunLoopSelector
+from ._selector import RunLoopSelector, _fileobj_to_fd
 
 _unset = object()
 _POSIX_TO_CFTIME = 978307200
 _EPSILON = 1e-6
+
+
+def _check_ssl_socket(sock):
+    if isinstance(sock, ssl.SSLSocket):
+        raise TypeError("Socket cannot be of type SSLSocket")
 
 
 def posix2cftime(posixtime):
@@ -102,6 +112,7 @@ class EventLoop(asyncio.AbstractEventLoop):
         self._timer = None
         self._timer_q = []
         self._signal_handlers = {}
+        self._transports = weakref.WeakValueDictionary()
 
         self._task_factory = None
         self._default_executor = None
@@ -400,37 +411,343 @@ class EventLoop(asyncio.AbstractEventLoop):
         raise NotImplementedError(9)
 
     # Watching file descriptors
-    async def add_reader(self, fd, callback, *args):
-        raise NotImplementedError(10)
 
-    async def remove_reader(self, fd):
-        raise NotImplementedError(11)
+    def _ensure_fd_no_transport(self, fd):
+        fileno = _fileobj_to_fd(fd)
 
-    async def add_writer(self, fd, *args):
-        raise NotImplementedError(12)
+        try:
+            transport = self._transports[fileno]
+        except KeyError:
+            pass
+        else:
+            if not transport.is_closing():
+                raise RuntimeError(
+                    f"File descriptor {fd!r} is used by transport " f"{transport!r}"
+                )
 
-    async def remove_writer(self, fd):
-        raise NotImplementedError(13)
+    def _add_reader(self, fd, callback, *args):
+        self._check_closed()
+        handle = asyncio.Handle(callback, args, self, None)
+        try:
+            key = self._selector.get_key(fd)
+        except KeyError:
+            self._selector.register(fd, kCFSocketReadCallBack, (handle, None))
+        else:
+            mask, (reader, writer) = key.events, key.data
+            self._selector.modify(fd, mask | kCFSocketReadCallBack, (handle, writer))
+            if reader is not None:
+                reader.cancel()
+
+    def _remove_reader(self, fd):
+        if self.is_closed():
+            return False
+        try:
+            key = self._selector.get_key(fd)
+        except KeyError:
+            return False
+        else:
+            mask, (reader, writer) = key.events, key.data
+            mask &= ~kCFSocketReadCallBack
+            if not mask:
+                self._selector.unregister(fd)
+            else:
+                self._selector.modify(fd, mask, (None, writer))
+
+            if reader is not None:
+                reader.cancel()
+                return True
+            else:
+                return False
+
+    def _add_writer(self, fd, callback, *args):
+        self._check_closed()
+        handle = asyncio.Handle(callback, args, self, None)
+        try:
+            key = self._selector.get_key(fd)
+        except KeyError:
+            self._selector.register(fd, kCFSocketWriteCallBack, (None, handle))
+        else:
+            mask, (reader, writer) = key.events, key.data
+            self._selector.modify(fd, mask | kCFSocketWriteCallBack, (reader, handle))
+            if writer is not None:
+                writer.cancel()
+
+    def _remove_writer(self, fd):
+        """Remove a writer callback."""
+        if self.is_closed():
+            return False
+        try:
+            key = self._selector.get_key(fd)
+        except KeyError:
+            return False
+        else:
+            mask, (reader, writer) = key.events, key.data
+            # Remove both writer and connector.
+            mask &= ~kCFSocketWriteCallBack
+            if not mask:
+                self._selector.unregister(fd)
+            else:
+                self._selector.modify(fd, mask, (reader, None))
+
+            if writer is not None:
+                writer.cancel()
+                return True
+            else:
+                return False
+
+    def add_reader(self, fd, callback, *args):
+        """Add a reader callback."""
+        self._ensure_fd_no_transport(fd)
+        return self._add_reader(fd, callback, *args)
+
+    def remove_reader(self, fd):
+        """Remove a reader callback."""
+        self._ensure_fd_no_transport(fd)
+        return self._remove_reader(fd)
+
+    def add_writer(self, fd, callback, *args):
+        """Add a writer callback.."""
+        self._ensure_fd_no_transport(fd)
+        return self._add_writer(fd, callback, *args)
+
+    def remove_writer(self, fd):
+        """Remove a writer callback."""
+        self._ensure_fd_no_transport(fd)
+        return self._remove_writer(fd)
 
     # Working with socket objects directly
 
-    async def sock_recv(self, sock, nbytes):
-        raise NotImplementedError(14)
+    async def sock_recv(self, sock, n):
+        """Receive data from the socket.
+
+        The return value is a bytes object representing the data received.
+        The maximum amount of data to be received at once is specified by
+        nbytes.
+        """
+        _check_ssl_socket(sock)
+        if self._debug and sock.gettimeout() != 0:
+            raise ValueError("the socket must be non-blocking")
+        try:
+            return sock.recv(n)
+        except (BlockingIOError, InterruptedError):
+            pass
+        fut = self.create_future()
+        fd = sock.fileno()
+        self.add_reader(fd, self._sock_recv, fut, sock, n)
+        fut.add_done_callback(functools.partial(self._sock_read_done, fd))
+        return await fut
+
+    def _sock_read_done(self, fd, fut):
+        self.remove_reader(fd)
+
+    def _sock_recv(self, fut, sock, n):
+        # _sock_recv() can add itself as an I/O callback if the operation can't
+        # be done immediately. Don't use it directly, call sock_recv().
+        if fut.done():
+            return
+        try:
+            data = sock.recv(n)
+        except (BlockingIOError, InterruptedError):
+            return  # try again next time
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException as exc:
+            fut.set_exception(exc)
+        else:
+            fut.set_result(data)
 
     async def sock_recv_into(self, sock, buf):
-        raise NotImplementedError(15)
+        """Receive data from the socket.
+
+        The received data is written into *buf* (a writable buffer).
+        The return value is the number of bytes written.
+        """
+        _check_ssl_socket(sock)
+        if self._debug and sock.gettimeout() != 0:
+            raise ValueError("the socket must be non-blocking")
+        try:
+            return sock.recv_into(buf)
+        except (BlockingIOError, InterruptedError):
+            pass
+        fut = self.create_future()
+        fd = sock.fileno()
+        self.add_reader(fd, self._sock_recv_into, fut, sock, buf)
+        fut.add_done_callback(functools.partial(self._sock_read_done, fd))
+        return await fut
+
+    def _sock_recv_into(self, fut, sock, buf):
+        # _sock_recv_into() can add itself as an I/O callback if the operation
+        # can't be done immediately. Don't use it directly, call
+        # sock_recv_into().
+        if fut.done():
+            return
+        try:
+            nbytes = sock.recv_into(buf)
+        except (BlockingIOError, InterruptedError):
+            return  # try again next time
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException as exc:
+            fut.set_exception(exc)
+        else:
+            fut.set_result(nbytes)
 
     async def sock_sendall(self, sock, data):
-        raise NotImplementedError(16)
+        """Send data to the socket.
+
+        The socket must be connected to a remote socket. This method continues
+        to send data from data until either all data has been sent or an
+        error occurs. None is returned on success. On error, an exception is
+        raised, and there is no way to determine how much data, if any, was
+        successfully processed by the receiving end of the connection.
+        """
+        _check_ssl_socket(sock)
+        if self._debug and sock.gettimeout() != 0:
+            raise ValueError("the socket must be non-blocking")
+        try:
+            n = sock.send(data)
+        except (BlockingIOError, InterruptedError):
+            n = 0
+
+        if n == len(data):
+            # all data sent
+            return
+
+        fut = self.create_future()
+        fd = sock.fileno()
+        fut.add_done_callback(functools.partial(self._sock_write_done, fd))
+        # use a trick with a list in closure to store a mutable state
+        self.add_writer(fd, self._sock_sendall, fut, sock, memoryview(data), [n])
+        return await fut
+
+    def _sock_sendall(self, fut, sock, view, pos):
+        if fut.done():
+            # Future cancellation can be scheduled on previous loop iteration
+            return
+        start = pos[0]
+        try:
+            n = sock.send(view[start:])
+        except (BlockingIOError, InterruptedError):
+            return
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException as exc:
+            fut.set_exception(exc)
+            return
+
+        start += n
+
+        if start == len(view):
+            fut.set_result(None)
+        else:
+            pos[0] = start
 
     async def sock_connect(self, sock, address):
-        raise NotImplementedError(17)
+        """Connect to a remote socket at address.
+
+        This method is a coroutine.
+        """
+        _check_ssl_socket(sock)
+        if self._debug and sock.gettimeout() != 0:
+            raise ValueError("the socket must be non-blocking")
+
+        if not hasattr(socket, "AF_UNIX") or sock.family != socket.AF_UNIX:
+            resolved = await self._ensure_resolved(
+                address, family=sock.family, proto=sock.proto, loop=self
+            )
+            _, _, _, _, address = resolved[0]
+
+        fut = self.create_future()
+        self._sock_connect(fut, sock, address)
+        return await fut
+
+    def _sock_connect(self, fut, sock, address):
+        fd = sock.fileno()
+        try:
+            sock.connect(address)
+        except (BlockingIOError, InterruptedError):
+            # Issue #23618: When the C function connect() fails with EINTR, the
+            # connection runs in background. We have to wait until the socket
+            # becomes writable to be notified when the connection succeed or
+            # fails.
+            fut.add_done_callback(functools.partial(self._sock_write_done, fd))
+            self.add_writer(fd, self._sock_connect_cb, fut, sock, address)
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException as exc:
+            fut.set_exception(exc)
+        else:
+            fut.set_result(None)
+
+    def _sock_write_done(self, fd, fut):
+        self.remove_writer(fd)
+
+    def _sock_connect_cb(self, fut, sock, address):
+        if fut.done():
+            return
+
+        try:
+            err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if err != 0:
+                # Jump to any except clause below.
+                raise OSError(err, f"Connect call failed {address}")
+        except (BlockingIOError, InterruptedError):
+            # socket is still registered, the callback will be retried later
+            pass
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException as exc:
+            fut.set_exception(exc)
+        else:
+            fut.set_result(None)
 
     async def sock_accept(self, sock):
-        raise NotImplementedError(18)
+        """Accept a connection.
 
-    async def sock_sendfile(self, file, offset=0, count=None, *, fallback=True):
-        raise NotImplementedError(19)
+        The socket must be bound to an address and listening for connections.
+        The return value is a pair (conn, address) where conn is a new socket
+        object usable to send and receive data on the connection, and address
+        is the address bound to the socket on the other end of the connection.
+        """
+        _check_ssl_socket(sock)
+        if self._debug and sock.gettimeout() != 0:
+            raise ValueError("the socket must be non-blocking")
+        fut = self.create_future()
+        self._sock_accept(fut, False, sock)
+        return await fut
+
+    def _sock_accept(self, fut, registered, sock):
+        fd = sock.fileno()
+        if registered:
+            self.remove_reader(fd)
+        if fut.done():
+            return
+        try:
+            conn, address = sock.accept()
+            conn.setblocking(False)
+        except (BlockingIOError, InterruptedError):
+            self.add_reader(fd, self._sock_accept, fut, True, sock)
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException as exc:
+            fut.set_exception(exc)
+        else:
+            fut.set_result((conn, address))
+
+    async def _sendfile_native(self, transp, file, offset, count):
+        del self._transports[transp._sock_fd]
+        resume_reading = transp.is_reading()
+        transp.pause_reading()
+        await transp._make_empty_waiter()
+        try:
+            return await self.sock_sendfile(
+                transp._sock, file, offset, count, fallback=False
+            )
+        finally:
+            transp._reset_empty_waiter()
+            if resume_reading:
+                transp.resume_reading()
+            self._transports[transp._sock_fd] = transp
 
     # DNS
     #
