@@ -34,3 +34,19 @@ def IBAction(method):
 
     else:
         return method
+
+
+def applicationShouldTerminateWrapper(method):
+    # XXX: Add API to pyobjc-core that will make it possible
+    # to automate the application of this decorator...
+    if not asyncio.iscoroutine(method):
+        return method
+
+    @functools.wraps(method)
+    def applicationShouldTerminate_(self, application):
+        task = asyncio.create_task(method(self, application))
+        task.add_done_callback(
+            lambda: application.replyToApplicationShouldTerminate_(task.result())
+        )
+
+    return applicationShouldTerminate_

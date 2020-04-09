@@ -1,11 +1,14 @@
 __all__ = "EventLoop"
 
 import asyncio
+import concurrent.futures
 import heapq
 import os
+import signal
 import socket
 import subprocess
 import sys
+from asyncio.unix_events import _UnixSubprocessTransport
 
 from Cocoa import (
     CFAbsoluteTimeGetCurrent,
@@ -28,10 +31,13 @@ from Cocoa import (
     kCFRunLoopExit,
 )
 
+from ._debug import traceexceptions
+from ._log import logger
 from ._selector import RunLoopSelector
 
 _unset = object()
 _POSIX_TO_CFTIME = 978307200
+_EPSILON = 1e-6
 
 
 def posix2cftime(posixtime):
@@ -44,11 +50,26 @@ def cftime2posix(cftime):
     return cftime + _POSIX_TO_CFTIME
 
 
+@traceexceptions
 def handle_callback(handle):
     if handle.cancelled():
         return
 
     handle._run()
+
+
+def _sighandler_noop(signum, frame):
+    """Dummy signal handler."""
+    pass
+
+
+def _format_pipe(fd):
+    if fd == subprocess.PIPE:
+        return "<pipe>"
+    elif fd == subprocess.STDOUT:
+        return "<stdout>"
+    else:
+        return repr(fd)
 
 
 class EventLoop(asyncio.AbstractEventLoop):
@@ -80,9 +101,10 @@ class EventLoop(asyncio.AbstractEventLoop):
         self._closed = False
         self._timer = None
         self._timer_q = []
+        self._signal_handlers = {}
 
         self._task_factory = None
-        self._executor = None
+        self._default_executor = None
         self._exception_handler = None
 
         # This mirrors how asyncio detects debug mode
@@ -91,11 +113,19 @@ class EventLoop(asyncio.AbstractEventLoop):
             and bool(os.environ.get("PYTHONASYNCIODEBUG"))
         )
 
+        self._internal_fds = 0
+        # self._make_self_pipe()
+
     def __del__(self):
+        return
         if self._observer is not None:
             CFRunLoopRemoveObserver(self._loop, self._observer, kCFRunLoopCommonModes)
 
     def _observer_loop(self, observer, activity):
+        return self._actual_observer(observer, activity)
+
+    @traceexceptions
+    def _actual_observer(self, observer, activity):
         if activity == kCFRunLoopEntry:
             self._running = True
             asyncio._set_running_loop(self)
@@ -106,18 +136,22 @@ class EventLoop(asyncio.AbstractEventLoop):
 
     # Running and stopping the loop
 
+    @traceexceptions
     def run_until_complete(self, future):
         future.add_done_callback(lambda: self.stop())
         self.run_forever()
 
         return future.result()
 
+    @traceexceptions
     def _asyncgen_firstiter_hook(self, agen):
         ...
 
+    @traceexceptions
     def _asyncgen_finalizer_hook(self, agen):
         ...
 
+    @traceexceptions
     def run_forever(self):
         old_agen_hooks = sys.get_asyncgen_hooks()
         sys.set_asyncgen_hooks(
@@ -125,22 +159,33 @@ class EventLoop(asyncio.AbstractEventLoop):
             finalizer=self._asyncgen_finalizer_hook,
         )
         try:
+            asyncio._set_running_loop(self)
             CFRunLoopRun()
         finally:
             sys.set_asyncgen_hooks(*old_agen_hooks)
+            asyncio._set_running_loop(None)
 
+    @traceexceptions
     def stop(self):
         CFRunLoopStop(self._loop)
 
+    @traceexceptions
     def is_running(self):
         # XXX: This should also return true if the Cocoa
         # runloop is active due to some other reason.
         #
         return self._running
 
+    @traceexceptions
+    def _check_closed(self):
+        if self._closed:
+            raise RuntimeError("Event loop is closed")
+
+    @traceexceptions
     def is_closed(self):
         return self._closed
 
+    @traceexceptions
     def close(self):
         if self._running:
             raise RuntimeError
@@ -161,21 +206,23 @@ class EventLoop(asyncio.AbstractEventLoop):
         self._selector = None
         self._closed = True
 
+    @traceexceptions
     def shutdown_asyncgens(self):
         raise NotImplementedError(1)
 
     # Scheduling callbacks
 
+    @traceexceptions
     def call_soon(self, callback, *args, context=None):
         handle = asyncio.Handle(callback, args, self, context)
         CFRunLoopPerformBlock(
             self._loop, kCFRunLoopCommonModes, lambda: handle_callback(handle)
         )
         CFRunLoopWakeUp(self._loop)
-
         return handle
 
-    def call_soon_thread_safe(self, callback, *args, context=None):
+    @traceexceptions
+    def call_soon_threadsafe(self, callback, *args, context=None):
         handle = asyncio.Handle(callback, args, self, context)
         CFRunLoopPerformBlock(
             self._loop, kCFRunLoopCommonModes, lambda: handle_callback(handle)
@@ -185,11 +232,13 @@ class EventLoop(asyncio.AbstractEventLoop):
 
     # Scheduling delayed callbacks
 
+    @traceexceptions
     def call_later(self, delay, callback, *args, context=None):
         return self.call_at(self.time() + delay, callback, *args, context=context)
 
+    @traceexceptions
     def _process_timer(self):
-        while self._timer_q and self._timer_q[0].when() <= self.time():
+        while self._timer_q and self._timer_q[0].when() <= self.time() + _EPSILON:
             handle = heapq.heappop(self._timer_q)
             handle_callback(handle)
 
@@ -198,6 +247,7 @@ class EventLoop(asyncio.AbstractEventLoop):
                 self._timer, posix2cftime(self._timer_q[0].when())
             )
 
+    @traceexceptions
     def call_at(self, when, callback, *args, context=None):
         cfwhen = posix2cftime(when)
         if self._timer is None:
@@ -218,13 +268,16 @@ class EventLoop(asyncio.AbstractEventLoop):
 
         return handle
 
+    @traceexceptions
     def time(self):
         return cftime2posix(CFAbsoluteTimeGetCurrent())
 
     # Creating Futures and Tasks
+    @traceexceptions
     def create_future(self):
         return asyncio.Future(loop=self)
 
+    @traceexceptions
     def create_task(self, coro, *, name=None):
         if self._task_factory is not None:
             task = self._task_factory(coro)
@@ -235,9 +288,11 @@ class EventLoop(asyncio.AbstractEventLoop):
         else:
             return asyncio.Task(coro, loop=self, name=name)
 
+    @traceexceptions
     def set_task_factory(self, factory):
         self._task_factory = factory
 
+    @traceexceptions
     def get_task_factory(self):
         return self._task_factory
 
@@ -378,14 +433,50 @@ class EventLoop(asyncio.AbstractEventLoop):
         raise NotImplementedError(19)
 
     # DNS
+    #
+    # XXX: Inventigate using CFNetwork for this
 
+    @traceexceptions
+    def _getaddrinfo_debug(self, host, port, family, type, proto, flags):  # noqa: A002
+        msg = [f"{host}:{port!r}"]
+        if family:
+            msg.append(f"family={family!r}")
+        if type:
+            msg.append(f"type={type!r}")
+        if proto:
+            msg.append(f"proto={proto!r}")
+        if flags:
+            msg.append(f"flags={flags!r}")
+        msg = ", ".join(msg)
+        logger.debug("Get address info %s", msg)
+
+        t0 = self.time()
+        addrinfo = socket.getaddrinfo(host, port, family, type, proto, flags)
+        dt = self.time() - t0
+
+        msg = f"Getting address info {msg} took {dt * 1e3:.3f}ms: {addrinfo!r}"
+        if dt >= self.slow_callback_duration:
+            logger.info(msg)
+        else:
+            logger.debug(msg)
+        return addrinfo
+
+    @traceexceptions
     async def getaddrinfo(
         self, host, port, *, family=0, type=0, proto=0, flags=0  # noqa: A002
     ):
-        raise NotImplementedError(20)
+        if self._debug:
+            getaddr_func = self._getaddrinfo_debug
+        else:
+            getaddr_func = socket.getaddrinfo
 
+        return await self.run_in_executor(
+            None, getaddr_func, host, port, family, type, proto, flags
+        )
+
+    @traceexceptions
     async def getnameinfo(self, sockaddr, flags=0):
-        raise NotImplementedError(21)
+        return await self.run_in_executor(None, socket.getnameinfo, sockaddr, flags)
 
     # Working with pipes
 
@@ -397,28 +488,69 @@ class EventLoop(asyncio.AbstractEventLoop):
 
     # Unix signals
 
-    def add_signal_handler(self, signum, callback, *args):
+    @traceexceptions
+    def add_signal_handler(self, sig, callback, *args):
+        """Add a handler for a signal.  UNIX only.
+
+        Raise ValueError if the signal number is invalid or uncatchable.
+        Raise RuntimeError if there is a problem setting up the handler.
+        """
         raise NotImplementedError(24)
 
-    def remove_singal_handler(self, signum):
+    @traceexceptions
+    def remove_signal_handler(self, sig):
+        """Remove a handler for a signal.  UNIX only.
+
+        Return True if a signal handler was removed, False if not.
+        """
         raise NotImplementedError(25)
+
+    @traceexceptions
+    def _check_signal(self, sig):
+        """Internal helper to validate a signal.
+
+        Raise ValueError if the signal number is invalid or uncatchable.
+        Raise RuntimeError if there is a problem setting up the handler.
+        """
+        if not isinstance(sig, int):
+            raise TypeError(f"sig must be an int, not {sig!r}")
+
+        if sig not in signal.valid_signals():
+            raise ValueError(f"invalid signal number {sig}")
 
     # Executing code in thread or process pools
 
-    async def run_in_executor(self, executor, func, *args):
-        raise NotImplementedError(26)
+    @traceexceptions
+    def run_in_executor(self, executor, func, *args):
+        self._check_closed()
+        if self._debug:
+            self._check_callback(func, "run_in_executor")
+        if executor is None:
+            executor = self._default_executor
+            # Only check when the default executor is being used
+            self._check_default_executor()
+            if executor is None:
+                executor = concurrent.futures.ThreadPoolExecutor(
+                    thread_name_prefix="objc_asyncio"
+                )
+                self._default_executor = executor
+        return asyncio.wrap_future(executor.submit(func, *args), loop=self)
 
+    @traceexceptions
     def set_default_executor(self, executor):
-        self._executor = executor
+        self._default_executor = executor
 
     # Error handling API
 
+    @traceexceptions
     def set_exception_handler(self, handler):
         self._exeception_handler = handler
 
+    @traceexceptions
     def get_exception_handler(self):
         return self._exeception_handler
 
+    @traceexceptions
     def default_exception_handler(self, context):
         print("Exception", context)
 
@@ -427,24 +559,29 @@ class EventLoop(asyncio.AbstractEventLoop):
 
     # Enabling debug mode
 
+    @traceexceptions
     def get_debug(self):
         return self._debug
 
+    @traceexceptions
     def set_debug(self, enabled):
         self._debug = bool(enabled)
 
     # Running subprocesses
 
-    async def subprocess_exec(
-        self,
-        protocol_factory,
-        *args,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        **kwargs,
-    ):
-        raise NotImplementedError(27)
+    @traceexceptions
+    def _log_subprocess(self, msg, stdin, stdout, stderr):
+        info = [msg]
+        if stdin is not None:
+            info.append(f"stdin={_format_pipe(stdin)}")
+        if stdout is not None and stderr == subprocess.STDOUT:
+            info.append(f"stdout=stderr={_format_pipe(stdout)}")
+        else:
+            if stdout is not None:
+                info.append(f"stdout={_format_pipe(stdout)}")
+            if stderr is not None:
+                info.append(f"stderr={_format_pipe(stderr)}")
+        logger.debug(" ".join(info))
 
     async def subprocess_shell(
         self,
@@ -454,16 +591,163 @@ class EventLoop(asyncio.AbstractEventLoop):
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        universal_newlines=False,
+        shell=True,
+        bufsize=0,
+        encoding=None,
+        errors=None,
+        text=None,
         **kwargs,
     ):
-        raise NotImplementedError(28)
+        if not isinstance(cmd, (bytes, str)):
+            raise ValueError("cmd must be a string")
+        if universal_newlines:
+            raise ValueError("universal_newlines must be False")
+        if not shell:
+            raise ValueError("shell must be True")
+        if bufsize != 0:
+            raise ValueError("bufsize must be 0")
+        if text:
+            raise ValueError("text must be False")
+        if encoding is not None:
+            raise ValueError("encoding must be None")
+        if errors is not None:
+            raise ValueError("errors must be None")
+
+        protocol = protocol_factory()
+        debug_log = None
+        if self._debug:
+            # don't log parameters: they may contain sensitive information
+            # (password) and may be too long
+            debug_log = "run shell command %r" % cmd
+            self._log_subprocess(debug_log, stdin, stdout, stderr)
+        transport = await self._make_subprocess_transport(
+            protocol, cmd, True, stdin, stdout, stderr, bufsize, **kwargs
+        )
+        if self._debug and debug_log is not None:
+            logger.info("%s: %r", debug_log, transport)
+        return transport, protocol
+
+    async def subprocess_exec(
+        self,
+        protocol_factory,
+        program,
+        *args,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=False,
+        shell=False,
+        bufsize=0,
+        encoding=None,
+        errors=None,
+        text=None,
+        **kwargs,
+    ):
+        if universal_newlines:
+            raise ValueError("universal_newlines must be False")
+        if shell:
+            raise ValueError("shell must be False")
+        if bufsize != 0:
+            raise ValueError("bufsize must be 0")
+        if text:
+            raise ValueError("text must be False")
+        if encoding is not None:
+            raise ValueError("encoding must be None")
+        if errors is not None:
+            raise ValueError("errors must be None")
+
+        popen_args = (program,) + args
+        protocol = protocol_factory()
+        debug_log = None
+        if self._debug:
+            # don't log parameters: they may contain sensitive information
+            # (password) and may be too long
+            debug_log = f"execute program {program!r}"
+            self._log_subprocess(debug_log, stdin, stdout, stderr)
+        transport = await self._make_subprocess_transport(
+            protocol, popen_args, False, stdin, stdout, stderr, bufsize, **kwargs
+        )
+        if self._debug and debug_log is not None:
+            logger.info("%s: %r", debug_log, transport)
+        return transport, protocol
+
+    async def _make_subprocess_transport(
+        self,
+        protocol,
+        args,
+        shell,
+        stdin,
+        stdout,
+        stderr,
+        bufsize,
+        extra=None,
+        **kwargs,
+    ):
+        with asyncio.get_child_watcher() as watcher:
+            if not watcher.is_active():
+                # Check early.
+                # Raising exception before process creation
+                # prevents subprocess execution if the watcher
+                # is not ready to handle it.
+                raise RuntimeError(
+                    "asyncio.get_child_watcher() is not activated, "
+                    "subprocess support is not installed."
+                )
+            waiter = self.create_future()
+            transp = _UnixSubprocessTransport(
+                self,
+                protocol,
+                args,
+                shell,
+                stdin,
+                stdout,
+                stderr,
+                bufsize,
+                waiter=waiter,
+                extra=extra,
+                **kwargs,
+            )
+
+            watcher.add_child_handler(
+                transp.get_pid(), self._child_watcher_callback, transp
+            )
+            try:
+                await waiter
+            except (SystemExit, KeyboardInterrupt):
+                raise
+            except BaseException:
+                transp.close()
+                await transp._wait()
+                raise
+
+        return transp
+
+    def _child_watcher_callback(self, pid, returncode, transp):
+        self.call_soon_threadsafe(transp._process_exited, returncode)
 
     #
     #
 
+    @traceexceptions
     def _timer_handle_cancelled(self, handle):
         if handle._scheduled:
             self._timer_cancelled_count += 1
 
+    @traceexceptions
     def _io_event(self, event, key):
+        print("handle event", event, key)
         raise NotImplementedError(29)
+
+    def _check_callback(self, callback, method):
+        if asyncio.iscoroutine(callback) or asyncio.iscoroutinefunction(callback):
+            raise TypeError(f"coroutines cannot be used with {method}()")
+        if not callable(callback):
+            raise TypeError(
+                f"a callable object was expected by {method}(), " f"got {callback!r}"
+            )
+
+    def _check_default_executor(self):
+        return
+        if self._executor_shutdown_called:
+            raise RuntimeError("Executor shutdown has been called")
