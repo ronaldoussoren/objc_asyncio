@@ -1,7 +1,6 @@
 __all__ = "EventLoop"
 
 import asyncio
-import concurrent.futures
 import functools
 import heapq
 import os
@@ -10,6 +9,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import warnings
 import weakref
 from asyncio.unix_events import _UnixSubprocessTransport
 
@@ -37,6 +37,7 @@ from Cocoa import (
 )
 
 from ._debug import traceexceptions
+from ._executor import ExecutorMixin
 from ._log import logger
 from ._selector import RunLoopSelector, _fileobj_to_fd
 
@@ -82,7 +83,7 @@ def _format_pipe(fd):
         return repr(fd)
 
 
-class EventLoop(asyncio.AbstractEventLoop):
+class EventLoop(ExecutorMixin, asyncio.AbstractEventLoop):
     """
     An asyncio eventloop that uses a Cocoa eventloop
 
@@ -115,7 +116,6 @@ class EventLoop(asyncio.AbstractEventLoop):
         self._transports = weakref.WeakValueDictionary()
 
         self._task_factory = None
-        self._default_executor = None
         self._exception_handler = None
 
         # This mirrors how asyncio detects debug mode
@@ -127,10 +127,16 @@ class EventLoop(asyncio.AbstractEventLoop):
         self._internal_fds = 0
         # self._make_self_pipe()
 
-    def __del__(self):
-        return
+        ExecutorMixin.__init__(self)
+
+    def __del__(self, _warn=warnings.warn):
         if self._observer is not None:
             CFRunLoopRemoveObserver(self._loop, self._observer, kCFRunLoopCommonModes)
+
+        if not self.is_closed():
+            _warn(f"unclosed event loop {self!r}", ResourceWarning, source=self)
+            if not self.is_running():
+                self.close()
 
     def _observer_loop(self, observer, activity):
         return self._actual_observer(observer, activity)
@@ -216,6 +222,8 @@ class EventLoop(asyncio.AbstractEventLoop):
         self._selector.close()
         self._selector = None
         self._closed = True
+
+        ExecutorMixin.close(self)
 
     @traceexceptions
     def shutdown_asyncgens(self):
@@ -838,28 +846,6 @@ class EventLoop(asyncio.AbstractEventLoop):
     # Executing code in thread or process pools
 
     @traceexceptions
-    def run_in_executor(self, executor, func, *args):
-        self._check_closed()
-        if self._debug:
-            self._check_callback(func, "run_in_executor")
-        if executor is None:
-            executor = self._default_executor
-            # Only check when the default executor is being used
-            self._check_default_executor()
-            if executor is None:
-                executor = concurrent.futures.ThreadPoolExecutor(
-                    thread_name_prefix="objc_asyncio"
-                )
-                self._default_executor = executor
-        return asyncio.wrap_future(executor.submit(func, *args), loop=self)
-
-    @traceexceptions
-    def set_default_executor(self, executor):
-        self._default_executor = executor
-
-    # Error handling API
-
-    @traceexceptions
     def set_exception_handler(self, handler):
         self._exeception_handler = handler
 
@@ -1063,8 +1049,3 @@ class EventLoop(asyncio.AbstractEventLoop):
             raise TypeError(
                 f"a callable object was expected by {method}(), " f"got {callback!r}"
             )
-
-    def _check_default_executor(self):
-        return
-        if self._executor_shutdown_called:
-            raise RuntimeError("Executor shutdown has been called")
