@@ -37,6 +37,7 @@ from Cocoa import (
 )
 
 from ._debug import traceexceptions
+from ._exceptionhandler import ExceptionHandlerMixin
 from ._executor import ExecutorMixin
 from ._log import logger
 from ._selector import RunLoopSelector, _fileobj_to_fd
@@ -83,7 +84,7 @@ def _format_pipe(fd):
         return repr(fd)
 
 
-class EventLoop(ExecutorMixin, asyncio.AbstractEventLoop):
+class EventLoop(ExecutorMixin, ExceptionHandlerMixin, asyncio.AbstractEventLoop):
     """
     An asyncio eventloop that uses a Cocoa eventloop
 
@@ -127,6 +128,7 @@ class EventLoop(ExecutorMixin, asyncio.AbstractEventLoop):
         self._internal_fds = 0
         # self._make_self_pipe()
 
+        ExceptionHandlerMixin.__init__(self)
         ExecutorMixin.__init__(self)
 
     def __del__(self, _warn=warnings.warn):
@@ -844,21 +846,6 @@ class EventLoop(ExecutorMixin, asyncio.AbstractEventLoop):
             raise ValueError(f"invalid signal number {sig}")
 
     # Executing code in thread or process pools
-
-    @traceexceptions
-    def set_exception_handler(self, handler):
-        self._exeception_handler = handler
-
-    @traceexceptions
-    def get_exception_handler(self):
-        return self._exeception_handler
-
-    @traceexceptions
-    def default_exception_handler(self, context):
-        print("Exception", context)
-
-    def call_exception_handler(self, context):
-        print("call_exception_handler", context)
 
     # Enabling debug mode
 
