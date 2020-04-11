@@ -89,8 +89,8 @@ latex_documents = [
     (
         "index",
         "objc_asyncio.tex",
-        u"objc_asyncio Documentation",
-        u"Ronald Oussoren",
+        "objc_asyncio Documentation",
+        "Ronald Oussoren",
         "manual",
     )
 ]

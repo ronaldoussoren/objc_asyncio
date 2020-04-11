@@ -19,7 +19,7 @@ class ExceptionHandlerMixin:
         will be a dict object (see `call_exception_handler()`
         documentation for details about context).
         """
-        self._exeception_handler = handler
+        self._exception_handler = handler
 
     def get_exception_handler(self):
         """Return an exception handler, or None if the default one is in use.
