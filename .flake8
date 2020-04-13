@@ -1,4 +1,5 @@
 [flake8]
+exclude=_upstream/*
 max-line-length = 88
 select = C,E,F,W,B,B950,T,Q,M,B950,A
 # Temporarily ignore T000 messages

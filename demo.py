@@ -47,6 +47,7 @@ async def resolver():
     print("Start resolving")
     info = await el.getaddrinfo("www.rivm.nl", 80)
     print(info)
+    raise 1 / 0
     el.stop()
 
 

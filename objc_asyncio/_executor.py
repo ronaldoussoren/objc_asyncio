@@ -33,6 +33,11 @@ class ExecutorMixin:
         return asyncio.wrap_future(executor.submit(func, *args), loop=self)
 
     def set_default_executor(self, executor):
+        if not isinstance(executor, concurrent.futures.ThreadPoolExecutor):
+            # NOTE: This is legal in Python 3.8 an earlier, but will be an error
+            # in Python 3.9.
+            raise TypeError(f"{executor} is not a ThreadPoolExecutor")
+
         self._default_executor = executor
 
     async def shutdown_default_executor(self):
