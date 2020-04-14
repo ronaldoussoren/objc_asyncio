@@ -2,7 +2,7 @@ import asyncio
 import traceback
 
 import objc
-from objc_asyncio import EventLoop
+from objc_asyncio import PyObjCEventLoop
 
 objc.setVerbose(True)
 
@@ -47,7 +47,6 @@ async def resolver():
     print("Start resolving")
     info = await el.getaddrinfo("www.rivm.nl", 80)
     print(info)
-    raise 1 / 0
     el.stop()
 
 
@@ -73,7 +72,7 @@ async def executor():
         traceback.print_exc()
 
 
-el = EventLoop()
+el = PyObjCEventLoop()
 # el = asyncio.get_event_loop()
 # el.set_debug(True)
 asyncio.set_event_loop(el)
