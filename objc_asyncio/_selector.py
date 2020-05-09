@@ -11,31 +11,26 @@ from collections import namedtuple
 from selectors import _SelectorMapping
 
 from Cocoa import (
+    CFFileDescriptorCreate,
+    CFFileDescriptorCreateRunLoopSource,
+    CFFileDescriptorDisableCallBacks,
+    CFFileDescriptorEnableCallBacks,
     CFRunLoopAddSource,
     CFRunLoopRemoveSource,
-    CFSocketCreateRunLoopSource,
-    CFSocketCreateWithNative,
-    CFSocketDisableCallBacks,
-    CFSocketEnableCallBacks,
+    kCFFileDescriptorReadCallBack,
+    kCFFileDescriptorWriteCallBack,
     kCFRunLoopCommonModes,
-    kCFSocketAcceptCallBack,
-    kCFSocketConnectCallBack,
-    kCFSocketNoCallBack,
-    kCFSocketReadCallBack,
-    kCFSocketWriteCallBack,
 )
 
 SelectorKey = namedtuple(
-    "SelectorKey", ["fileobj", "fd", "events", "data", "cfsocket", "cfsource"]
+    "SelectorKey", ["fileobj", "fd", "events", "data", "cffd", "cfsource"]
 )
 
 
-ALL_EVENTS = (
-    kCFSocketReadCallBack
-    | kCFSocketAcceptCallBack
-    | kCFSocketConnectCallBack
-    | kCFSocketWriteCallBack
-)
+EVENT_READ = kCFFileDescriptorReadCallBack
+EVENT_WRITE = kCFFileDescriptorWriteCallBack
+
+ALL_EVENTS = EVENT_READ | EVENT_WRITE
 
 
 def _valid_events(events):
@@ -81,12 +76,21 @@ class RunLoopSelector:
             # Raise ValueError after all.
             raise
 
-    def _callout(self, cfsock, event, address, data, fd):
-        self._eventloop._io_event(event, self._fd_to_key[fd])
+    def _callout(self, cffd, callbackTypes, info):
+        key = self._fd_to_key[info]
 
-    def _set_events(self, cfsock, old_events, new_events):
-        CFSocketDisableCallBacks(cfsock, old_events)
-        CFSocketEnableCallBacks(cfsock, new_events)
+        # CFFileDescriptor disables events once triggered, our
+        # contract is that events will keep getting triggered
+        # until explicitly disabled.
+        # CFFileDescriptorEnableCallBacks(key.cffd, key.events)
+
+        self._eventloop._io_event(callbackTypes, key)
+
+    def _set_events(self, cffd, old_events, new_events):
+        if old_events:
+            CFFileDescriptorDisableCallBacks(cffd, old_events)
+        if new_events:
+            CFFileDescriptorEnableCallBacks(cffd, new_events)
 
     def register(self, fileobj, events, data=None):
         if not _valid_events(events):
@@ -96,18 +100,16 @@ class RunLoopSelector:
         if fd in self._fd_to_key:
             raise KeyError(f"{fileobj} (FD {fd}) is already registered")
 
-        cfsock = CFSocketCreateWithNative(
-            None, fd, kCFSocketNoCallBack, self._callout, fd
-        )
-        cfsource = CFSocketCreateRunLoopSource(None, cfsock, 0)
+        cffd = CFFileDescriptorCreate(None, fd, False, self._callout, fd)
+        cfsource = CFFileDescriptorCreateRunLoopSource(None, cffd, 0)
         CFRunLoopAddSource(self._eventloop._loop, cfsource, kCFRunLoopCommonModes)
 
         key = SelectorKey(
-            fileobj, self._fileobj_lookup(fileobj), events, data, cfsock, cfsource
+            fileobj, self._fileobj_lookup(fileobj), events, data, cffd, cfsource
         )
 
         self._fd_to_key[key.fd] = key
-        self._set_events(key.cfsocket, kCFSocketNoCallBack, events)
+        self._set_events(key.cffd, 0, events)
         return key
 
     def unregister(self, fileobj):
@@ -131,7 +133,7 @@ class RunLoopSelector:
             raise ValueError(f"Invalid events: {events}")
 
         if events != key.events:
-            self._set_events(key.cfsocket, key.events, events)
+            self._set_events(key.cffd, key.events, events)
             key = key._replace(events=events, data=data)
             self._fd_to_key[key.fd] = key
 

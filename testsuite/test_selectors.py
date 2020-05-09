@@ -4,20 +4,11 @@ import unittest
 from unittest import mock
 
 import Cocoa
-from Cocoa import (
-    kCFSocketAcceptCallBack,
-    kCFSocketConnectCallBack,
-    kCFSocketReadCallBack,
-    kCFSocketWriteCallBack,
-)
 from objc_asyncio import _selector as mod
 
-all_events = (
-    kCFSocketReadCallBack
-    | kCFSocketAcceptCallBack
-    | kCFSocketConnectCallBack
-    | kCFSocketWriteCallBack
-)
+
+def run_with_timeout(timeout=0.1, mode=Cocoa.kCFRunLoopDefaultMode):
+    Cocoa.CFRunLoopRunInMode(mode, timeout, False)
 
 
 class TestSupportCode(unittest.TestCase):
@@ -27,22 +18,19 @@ class TestSupportCode(unittest.TestCase):
         self.assertEqual(v.fd, 2)
         self.assertEqual(v.events, 3)
         self.assertEqual(v.data, 4)
-        self.assertEqual(v.cfsocket, 5)
+        self.assertEqual(v.cffd, 5)
         self.assertEqual(v.cfsource, 6)
+
+    def test_event_types(self):
+        self.assertEqual(mod.EVENT_READ, Cocoa.kCFFileDescriptorReadCallBack)
+        self.assertEqual(mod.EVENT_WRITE, Cocoa.kCFFileDescriptorWriteCallBack)
 
     def test_valid_events(self):
         # mod._valid_events
-        self.assertTrue(mod._valid_events(kCFSocketReadCallBack))
-        self.assertTrue(mod._valid_events(kCFSocketReadCallBack))
-        self.assertTrue(mod._valid_events(kCFSocketAcceptCallBack))
-        self.assertTrue(mod._valid_events(kCFSocketConnectCallBack))
-        self.assertTrue(mod._valid_events(kCFSocketWriteCallBack))
-        self.assertTrue(
-            mod._valid_events(kCFSocketWriteCallBack | kCFSocketAcceptCallBack)
-        )
-        self.assertTrue(mod._valid_events(all_events))
-
-        self.assertFalse(mod._valid_events(all_events + 16))
+        self.assertTrue(mod._valid_events(mod.EVENT_READ))
+        self.assertTrue(mod._valid_events(mod.EVENT_WRITE))
+        self.assertTrue(mod._valid_events(mod.EVENT_READ | mod.EVENT_WRITE))
+        self.assertFalse(mod._valid_events(~(mod.EVENT_READ | mod.EVENT_WRITE)))
 
     def test__fileobj_to_fd__integer(self):
         with self.subTest("valid"):
@@ -103,8 +91,8 @@ class TestSelector(unittest.TestCase):
             isinstance(key.events, int), f"Events {key.events} is not an integer"
         )
         self.assertTrue(
-            isinstance(key.cfsocket, Cocoa.CFSocketRef),
-            f"cfsocket {key.cfsocket} is not an CFSocketRef",
+            isinstance(key.cffd, Cocoa.CFFileDescriptorRef),
+            f"cffd {key.cffd} is not an CFFileDescriptorRef",
         )
         self.assertTrue(
             isinstance(key.cfsource, Cocoa.CFRunLoopSourceRef),
@@ -112,9 +100,9 @@ class TestSelector(unittest.TestCase):
         )
 
         self.assertEqual(key.fd, mod._fileobj_to_fd(key.fileobj))
-        self.assertEqual(key.fd, Cocoa.CFSocketGetNative(key.cfsocket))
-        # It would be nice to check if cfsocket and cfsource are related...
-        # It would be nice to check if events and cfsocket are consistent...
+        self.assertEqual(key.fd, Cocoa.CFFileDescriptorGetNativeDescriptor(key.cffd))
+        # It would be nice to check if cffd and cfsource are related...
+        # It would be nice to check if events and cffd are consistent...
 
     def setUp(self):
         self.eventloop = FakeEventloop()
@@ -128,21 +116,31 @@ class TestSelector(unittest.TestCase):
         self.addCleanup(sd.close)
 
         with self.subTest("registration"):
-            key = self.selector.register(sd, Cocoa.kCFSocketReadCallBack, "data")
+            key = self.selector.register(sd, mod.EVENT_READ, "data")
             self.assert_key_consistent(key)
             self.assertIs(key.fileobj, sd)
             self.assertEqual(key.data, "data")
-            self.assertEqual(key.events, Cocoa.kCFSocketReadCallBack)
+            self.assertEqual(key.events, mod.EVENT_READ)
 
             self.assertIs(self.selector.get_key(sd), key)
 
         with self.subTest("modification"):
-            key2 = self.selector.modify(sd, Cocoa.kCFSocketWriteCallBack, key.data)
+            key2 = self.selector.modify(sd, mod.EVENT_WRITE, key.data)
             self.assertIsNot(key, key2)
             self.assert_key_consistent(key2)
             self.assertIs(key2.fileobj, sd)
             self.assertIs(key2.data, key.data)
-            self.assertEqual(key2.events, Cocoa.kCFSocketWriteCallBack)
+            self.assertEqual(key2.events, mod.EVENT_WRITE)
+
+            self.assertIs(self.selector.get_key(sd), key2)
+
+        with self.subTest("modification both"):
+            key2 = self.selector.modify(sd, mod.EVENT_READ | mod.EVENT_WRITE, key.data)
+            self.assertIsNot(key, key2)
+            self.assert_key_consistent(key2)
+            self.assertIs(key2.fileobj, sd)
+            self.assertIs(key2.data, key.data)
+            self.assertEqual(key2.events, mod.EVENT_READ | mod.EVENT_WRITE)
 
             self.assertIs(self.selector.get_key(sd), key2)
 
@@ -156,12 +154,14 @@ class TestSelector(unittest.TestCase):
 
     @mock.patch("objc_asyncio._selector.CFRunLoopAddSource", autospec=True)
     @mock.patch("objc_asyncio._selector.CFRunLoopRemoveSource", autospec=True)
-    @mock.patch("objc_asyncio._selector.CFSocketDisableCallBacks", autospec=True)
-    @mock.patch("objc_asyncio._selector.CFSocketEnableCallBacks", autospec=True)
+    @mock.patch(
+        "objc_asyncio._selector.CFFileDescriptorDisableCallBacks", autospec=True
+    )
+    @mock.patch("objc_asyncio._selector.CFFileDescriptorEnableCallBacks", autospec=True)
     def test_cf_registration(
         self,
-        CFSocketEnableCallBacks,
-        CFSocketDisableCallBacks,
+        CFFileDescriptorEnableCallBacks,
+        CFFileDescriptorDisableCallBacks,
         CFRunLoopRemoveSource,
         CFRunLoopAddSource,
     ):
@@ -171,40 +171,55 @@ class TestSelector(unittest.TestCase):
         self.addCleanup(sd.close)
 
         with self.subTest("registration"):
-            key = self.selector.register(sd, Cocoa.kCFSocketReadCallBack, "data")
+            key = self.selector.register(sd, mod.EVENT_READ, "data")
 
             CFRunLoopAddSource.assert_called_once_with(
                 self.eventloop._loop, key.cfsource, Cocoa.kCFRunLoopCommonModes
             )
             CFRunLoopRemoveSource.assert_not_called()
-            CFSocketDisableCallBacks.assert_called_once_with(
-                key.cfsocket, Cocoa.kCFSocketNoCallBack
-            )
-            CFSocketEnableCallBacks.assert_called_once_with(
-                key.cfsocket, Cocoa.kCFSocketReadCallBack
+            CFFileDescriptorDisableCallBacks.assert_not_called()
+            CFFileDescriptorEnableCallBacks.assert_called_once_with(
+                key.cffd, mod.EVENT_READ
             )
 
             CFRunLoopAddSource.reset_mock()
             CFRunLoopRemoveSource.reset_mock()
-            CFSocketDisableCallBacks.reset_mock()
-            CFSocketEnableCallBacks.reset_mock()
+            CFFileDescriptorDisableCallBacks.reset_mock()
+            CFFileDescriptorEnableCallBacks.reset_mock()
 
         with self.subTest("modification"):
-            key2 = self.selector.modify(sd, Cocoa.kCFSocketWriteCallBack, key.data)
+            key2 = self.selector.modify(sd, mod.EVENT_WRITE, key.data)
 
             CFRunLoopAddSource.assert_not_called()
             CFRunLoopRemoveSource.assert_not_called()
-            CFSocketDisableCallBacks.assert_called_once_with(
-                key.cfsocket, Cocoa.kCFSocketReadCallBack
+            CFFileDescriptorDisableCallBacks.assert_called_once_with(
+                key.cffd, mod.EVENT_READ
             )
-            CFSocketEnableCallBacks.assert_called_once_with(
-                key.cfsocket, Cocoa.kCFSocketWriteCallBack
+            CFFileDescriptorEnableCallBacks.assert_called_once_with(
+                key.cffd, mod.EVENT_WRITE
             )
 
             CFRunLoopAddSource.reset_mock()
             CFRunLoopRemoveSource.reset_mock()
-            CFSocketDisableCallBacks.reset_mock()
-            CFSocketEnableCallBacks.reset_mock()
+            CFFileDescriptorDisableCallBacks.reset_mock()
+            CFFileDescriptorEnableCallBacks.reset_mock()
+
+        with self.subTest("modification (both)"):
+            key2 = self.selector.modify(sd, mod.EVENT_READ | mod.EVENT_WRITE, key.data)
+
+            CFRunLoopAddSource.assert_not_called()
+            CFRunLoopRemoveSource.assert_not_called()
+            CFFileDescriptorDisableCallBacks.assert_called_once_with(
+                key.cffd, mod.EVENT_WRITE
+            )
+            CFFileDescriptorEnableCallBacks.assert_called_once_with(
+                key.cffd, mod.EVENT_READ | mod.EVENT_WRITE
+            )
+
+            CFRunLoopAddSource.reset_mock()
+            CFRunLoopRemoveSource.reset_mock()
+            CFFileDescriptorDisableCallBacks.reset_mock()
+            CFFileDescriptorEnableCallBacks.reset_mock()
 
         with self.subTest("unregistration"):
             self.selector.unregister(sd)
@@ -213,17 +228,17 @@ class TestSelector(unittest.TestCase):
             CFRunLoopRemoveSource.assert_called_once_with(
                 self.eventloop._loop, key2.cfsource, Cocoa.kCFRunLoopCommonModes
             )
-            CFSocketDisableCallBacks.assert_not_called()
-            CFSocketEnableCallBacks.assert_not_called()
+            CFFileDescriptorDisableCallBacks.assert_not_called()
+            CFFileDescriptorEnableCallBacks.assert_not_called()
 
     def test_register_existing_fails(self):
         sd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.addCleanup(sd.close)
 
-        self.selector.register(sd, Cocoa.kCFSocketReadCallBack, "data")
+        self.selector.register(sd, mod.EVENT_READ, "data")
 
         with self.assertRaises(KeyError):
-            self.selector.register(sd, Cocoa.kCFSocketWriteCallBack, "data2")
+            self.selector.register(sd, mod.EVENT_WRITE, "data2")
 
     def test_close_unregisters(self):
         sd1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -232,8 +247,8 @@ class TestSelector(unittest.TestCase):
         sd2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.addCleanup(sd2.close)
 
-        key1 = self.selector.register(sd1, Cocoa.kCFSocketReadCallBack, "data")
-        key2 = self.selector.register(sd2, Cocoa.kCFSocketReadCallBack, "data")
+        key1 = self.selector.register(sd1, mod.EVENT_READ, "data")
+        key2 = self.selector.register(sd2, mod.EVENT_READ, "data")
 
         self.assertIs(key1, self.selector.get_key(sd1))
         self.assertIs(key2, self.selector.get_key(sd2))
@@ -257,6 +272,53 @@ class TestSelector(unittest.TestCase):
         self.assertEqual(self.selector.get_map(), None)
         self.assertRaises(RuntimeError, self.selector.get_key, sd1)
 
-    # Test I/O using sockets
-    # Test I/O using pipes
-    # Test I/O using files
+    def test_socketio(self):
+        sd1, sd2 = socket.socketpair()
+        self.addCleanup(sd1.close)
+        self.addCleanup(sd2.close)
+
+        with self.subTest("no data"):
+            key = self.selector.register(sd1, mod.EVENT_READ, "data")
+
+            run_with_timeout()
+
+            self.assertEqual(self.eventloop._io_called, [])
+
+        with self.subTest("reading data"):
+            sd2.sendall(b"hello")
+
+            run_with_timeout()
+
+            self.assertEqual(len(self.eventloop._io_called), 1)
+            self.assertEqual(self.eventloop._io_called[0], (mod.EVENT_READ, key))
+
+            sd1.recv(5)
+
+        with self.subTest("waiting for writeable (no read data)"):
+            del self.eventloop._io_called[:]
+
+            key = self.selector.modify(sd1, mod.EVENT_READ | mod.EVENT_WRITE, "data")
+
+            run_with_timeout()
+
+            self.assertEqual(len(self.eventloop._io_called), 1)
+            self.assertEqual(self.eventloop._io_called[0], (mod.EVENT_WRITE, key))
+
+            sd1.send(b"hello")
+            sd2.recv(5)
+
+        with self.subTest("waiting for writeable (with read data)"):
+            del self.eventloop._io_called[:]
+            sd2.send(b"hello")
+
+            # XXX: The underlying API is needs to be reset after handling events, need
+            # to check if this is a problem for the socket code.
+            key = self.selector.modify(sd1, mod.EVENT_READ, "data")
+            key = self.selector.modify(sd1, mod.EVENT_READ | mod.EVENT_WRITE, "data")
+
+            run_with_timeout()
+
+            self.assertEqual(len(self.eventloop._io_called), 1)
+            self.assertEqual(
+                self.eventloop._io_called[0], (mod.EVENT_READ | mod.EVENT_WRITE, key)
+            )
