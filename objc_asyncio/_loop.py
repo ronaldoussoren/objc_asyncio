@@ -1,6 +1,7 @@
 __all__ = "EventLoop"
 
 import asyncio
+import collections
 import heapq
 import os
 import signal
@@ -17,7 +18,6 @@ from Cocoa import (
     CFRunLoopAddTimer,
     CFRunLoopGetCurrent,
     CFRunLoopObserverCreateWithHandler,
-    CFRunLoopPerformBlock,
     CFRunLoopRemoveObserver,
     CFRunLoopRemoveTimer,
     CFRunLoopRun,
@@ -27,6 +27,7 @@ from Cocoa import (
     CFRunLoopTimerInvalidate,
     CFRunLoopTimerSetNextFireDate,
     CFRunLoopWakeUp,
+    kCFRunLoopBeforeTimers,
     kCFRunLoopCommonModes,
     kCFRunLoopEntry,
     kCFRunLoopExit,
@@ -81,6 +82,15 @@ def _format_pipe(fd):
         return repr(fd)
 
 
+def _format_handle(handle):
+    cb = handle._callback
+    if isinstance(getattr(cb, "__self__", None), asyncio.Task):
+        # format the task
+        return repr(cb.__self__)
+    else:
+        return str(handle)
+
+
 class PyObjCEventLoop(
     SocketMixin,
     ExecutorMixin,
@@ -105,7 +115,11 @@ class PyObjCEventLoop(
         # the EventLoop is running when the CFRunLoop is active, even if
         # it is started by other code.
         self._observer = CFRunLoopObserverCreateWithHandler(
-            None, kCFRunLoopEntry | kCFRunLoopExit, True, 0, self._observer_loop
+            None,
+            kCFRunLoopEntry | kCFRunLoopExit | kCFRunLoopBeforeTimers,
+            True,
+            0,
+            self._observer_loop,
         )
         CFRunLoopAddObserver(self._loop, self._observer, kCFRunLoopCommonModes)
 
@@ -116,6 +130,9 @@ class PyObjCEventLoop(
         self._timer_q = []
         self._signal_handlers = {}
         self._transports = weakref.WeakValueDictionary()
+        self._asyncgens = weakref.WeakSet()
+        self._asyncgens_shutdown_called = False
+        self._ready = collections.deque()
 
         self._task_factory = None
         self._exception_handler = None
@@ -151,6 +168,44 @@ class PyObjCEventLoop(
             self._running = False
             asyncio._set_running_loop(None)
 
+        elif activity == kCFRunLoopBeforeTimers:
+            # This is the only place where callbacks are actually *called*.
+            # All other places just add them to ready.
+            # Note: We run all currently scheduled callbacks, but not any
+            # callbacks scheduled by callbacks run this time around --
+            # they will be run the next time (after another I/O poll).
+            # Use an idiom that is thread-safe without using locks.
+            ntodo = len(self._ready)
+            for _ in range(ntodo):
+                handle = self._ready.popleft()
+                if handle._cancelled:
+                    continue
+                if self._debug:
+                    try:
+                        self._current_handle = handle
+                        t0 = self.time()
+                        handle._run()
+                        dt = self.time() - t0
+                        if dt >= self.slow_callback_duration:
+                            logger.warning(
+                                "Executing %s took %.3f seconds",
+                                _format_handle(handle),
+                                dt,
+                            )
+                    finally:
+                        self._current_handle = None
+                else:
+                    handle._run()
+            handle = None  # Needed to break cycles when an exception occurs.
+
+    def _add_callback(self, handle):
+        """Add a Handle to _scheduled (TimerHandle) or _ready."""
+        assert isinstance(handle, asyncio.Handle), "A Handle is required here"
+        if handle._cancelled:
+            return
+        assert not isinstance(handle, asyncio.TimerHandle)
+        self._ready.append(handle)
+
     # Running and stopping the loop
 
     @traceexceptions
@@ -162,11 +217,21 @@ class PyObjCEventLoop(
 
     @traceexceptions
     def _asyncgen_firstiter_hook(self, agen):
-        ...
+        if self._asyncgens_shutdown_called:
+            warnings.warn(
+                f"asynchronous generator {agen!r} was scheduled after "
+                f"loop.shutdown_asyncgens() call",
+                ResourceWarning,
+                source=self,
+            )
+
+        self._asyncgens.add(agen)
 
     @traceexceptions
     def _asyncgen_finalizer_hook(self, agen):
-        ...
+        self._asyncgens.discard(agen)
+        if not self.is_closed():
+            self.call_soon_threadsafe(self.create_task, agen.aclose())
 
     @traceexceptions
     def run_forever(self):
@@ -223,26 +288,46 @@ class PyObjCEventLoop(
         SocketMixin.close(self)
 
     @traceexceptions
-    def shutdown_asyncgens(self):
-        raise NotImplementedError(1)
+    async def shutdown_asyncgens(self):
+        """Shutdown all active asynchronous generators."""
+        self._asyncgens_shutdown_called = True
+
+        if not len(self._asyncgens):
+            # If Python version is <3.6 or we don't have any asynchronous
+            # generators alive.
+            return
+
+        closing_agens = list(self._asyncgens)
+        self._asyncgens.clear()
+
+        results = await asyncio.gather(
+            *[ag.aclose() for ag in closing_agens], return_exceptions=True, loop=self
+        )
+
+        for result, agen in zip(results, closing_agens):
+            if isinstance(result, Exception):
+                self.call_exception_handler(
+                    {
+                        "message": f"an error occurred during closing of "
+                        f"asynchronous generator {agen!r}",
+                        "exception": result,
+                        "asyncgen": agen,
+                    }
+                )
 
     # Scheduling callbacks
 
     @traceexceptions
     def call_soon(self, callback, *args, context=None):
         handle = asyncio.Handle(callback, args, self, context)
-        CFRunLoopPerformBlock(
-            self._loop, kCFRunLoopCommonModes, lambda: handle_callback(handle)
-        )
+        self._ready.append(handle)
         CFRunLoopWakeUp(self._loop)
         return handle
 
     @traceexceptions
     def call_soon_threadsafe(self, callback, *args, context=None):
         handle = asyncio.Handle(callback, args, self, context)
-        CFRunLoopPerformBlock(
-            self._loop, kCFRunLoopCommonModes, lambda: handle_callback(handle)
-        )
+        self._ready.append(handle)
         CFRunLoopWakeUp(self._loop)
         return handle
 
@@ -530,11 +615,6 @@ class PyObjCEventLoop(
     def _timer_handle_cancelled(self, handle):
         if handle._scheduled:
             self._timer_cancelled_count += 1
-
-    @traceexceptions
-    def _io_event(self, event, key):
-        print("handle event", event, key)
-        raise NotImplementedError(29)
 
     def _check_callback(self, callback, method):
         if asyncio.iscoroutine(callback) or asyncio.iscoroutinefunction(callback):

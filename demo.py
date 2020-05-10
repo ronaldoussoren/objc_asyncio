@@ -1,10 +1,13 @@
 import asyncio
+import logging
 import traceback
 
 import objc
 from objc_asyncio import PyObjCEventLoop
 
-objc.setVerbose(True)
+objc.options.verbose = True
+
+logging.basicConfig(level=logging.DEBUG)
 
 
 async def printer():
@@ -72,6 +75,42 @@ async def executor():
         traceback.print_exc()
 
 
+async def basic_socket():
+    try:
+        print(f"Opening connection")
+        # reader, writer = await asyncio.open_connection('131.224.245.85', 80)
+
+        host = "131.224.245.85"
+        port = 80
+
+        reader = asyncio.StreamReader(limit=1000, loop=el)
+        print("reader", reader)
+        protocol = asyncio.StreamReaderProtocol(reader, loop=el)
+        print("protocol", protocol)
+        transport, _ = await el.create_connection(lambda: protocol, host, port)
+        print("transport", transport)
+        writer = asyncio.StreamWriter(transport, protocol, reader, el)
+        print("writer", writer)
+
+        print(f"Sending request")
+        writer.write(b"GET / HTTP/1.0\r\nHost: www.rivm.nl\r\n\r\n")
+        await writer.drain()
+
+        data = await reader.read(200)
+        print(f"Received: {data.decode()!r}")
+
+        print("Close the connection")
+        writer.close()
+        await writer.wait_closed()
+
+    except:  # noqa: E722, B001
+        traceback.print_exc()
+        raise
+
+    finally:
+        el.stop()
+
+
 el = PyObjCEventLoop()
 # el = asyncio.get_event_loop()
 # el.set_debug(True)
@@ -86,7 +125,8 @@ asyncio.set_event_loop(el)
 # el.run_until_complete(task)
 # task = el.create_task(run("ls -1"))
 # task = el.create_task(clock())
-task = el.create_task(resolver())
+# task = el.create_task(resolver())
 # task = el.create_task(executor())
 # task = el.create_task(main())
+task = el.create_task(basic_socket())
 el.run_forever()

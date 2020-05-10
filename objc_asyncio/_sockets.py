@@ -1,5 +1,6 @@
 """Mixin for socket handling"""
 
+
 import asyncio
 import collections
 import functools
@@ -8,48 +9,61 @@ import os
 import socket
 import ssl
 import stat
-import sys
 import warnings
+import weakref
 from asyncio import constants  # XXX
-from asyncio import staggered  # XXX
 from asyncio.base_events import Server, _SendfileFallbackProtocol  # XXX
+from asyncio.selector_events import _SelectorSocketTransport
 
-from Cocoa import kCFSocketReadCallBack, kCFSocketWriteCallBack
-
+from ._debug import traceexceptions
 from ._log import logger
 from ._resolver import _interleave_addrinfos, _ipaddr_info
-from ._selector import RunLoopSelector, _fileobj_to_fd
+from ._selector import EVENT_READ, EVENT_WRITE, RunLoopSelector, _fileobj_to_fd
 
 _unset = object()
 
 
+@traceexceptions
 def _set_reuseport(sock):
-    if not hasattr(socket, "SO_REUSEPORT"):
-        raise ValueError("reuse_port not supported by socket module")
-    else:
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except OSError:
-            raise ValueError(
-                "reuse_port not supported by socket module, "
-                "SO_REUSEPORT defined but not implemented."
-            )
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
 
 
+@traceexceptions
 def _check_ssl_socket(sock):
-    if ssl is not None and isinstance(sock, ssl.SSLSocket):
+    if isinstance(sock, ssl.SSLSocket):
         raise TypeError("Socket cannot be of type SSLSocket")
 
 
 class SocketMixin:
     def __init__(self):
         self._selector = RunLoopSelector(self)
+        self._transports = weakref.WeakValueDictionary()
 
     def close(self):
         if self._selector is not None:
             self._selector.close()
             self._selector = None
 
+    @traceexceptions
+    def _io_event(self, events, key):
+        fileobj, (reader, writer) = key.fileobj, key.data
+        if events & EVENT_READ and reader is not None:
+            if reader._cancelled:
+                self._remove_reader(fileobj)
+            else:
+                self._add_callback(reader)
+        if events & EVENT_WRITE and writer is not None:
+            if writer._cancelled:
+                self._remove_writer(fileobj)
+            else:
+                self._add_callback(writer)
+
+    def _make_socket_transport(
+        self, sock, protocol, waiter=None, *, extra=None, server=None
+    ):
+        return _SelectorSocketTransport(self, sock, protocol, waiter, extra, server)
+
+    @traceexceptions
     async def sock_sendfile(self, sock, file, offset=0, count=None, *, fallback=True):
         if self._debug and sock.gettimeout() != 0:
             raise ValueError("the socket must be non-blocking")
@@ -61,6 +75,7 @@ class SocketMixin:
                 raise
         return await self._sock_sendfile_fallback(sock, file, offset, count)
 
+    @traceexceptions
     async def _sock_sendfile_fallback(self, sock, file, offset, count):
         if offset:
             file.seek(offset)
@@ -88,6 +103,7 @@ class SocketMixin:
             if total_sent > 0 and hasattr(file, "seek"):
                 file.seek(offset + total_sent)
 
+    @traceexceptions
     def _check_sendfile_params(self, sock, file, offset, count):
         if "b" not in getattr(file, "mode", "b"):
             raise ValueError("file should be opened in binary mode")
@@ -111,6 +127,7 @@ class SocketMixin:
                 "offset must be a non-negative integer (got {!r})".format(offset)
             )
 
+    @traceexceptions
     async def _connect_sock(self, exceptions, addr_info, local_addr_infos=None):
         """Create, bind and connect one socket."""
         my_exceptions = []
@@ -147,6 +164,7 @@ class SocketMixin:
                 sock.close()
             raise
 
+    @traceexceptions
     async def create_connection(
         self,
         protocol_factory,
@@ -175,6 +193,7 @@ class SocketMixin:
         in the background.  When successful, the coroutine returns a
         (transport, protocol) pair.
         """
+        logger.debug(f"create_connection {host!r} {port!r}")
         if server_hostname is not None and not ssl:
             raise ValueError("server_hostname is only meaningful with ssl")
 
@@ -214,7 +233,6 @@ class SocketMixin:
                 type=socket.SOCK_STREAM,
                 proto=proto,
                 flags=flags,
-                loop=self,
             )
             if not infos:
                 raise OSError("getaddrinfo() returned empty list")
@@ -226,7 +244,6 @@ class SocketMixin:
                     type=socket.SOCK_STREAM,
                     proto=proto,
                     flags=flags,
-                    loop=self,
                 )
                 if not laddr_infos:
                     raise OSError("getaddrinfo() returned empty list")
@@ -248,7 +265,7 @@ class SocketMixin:
                     except OSError:
                         continue
             else:  # using happy eyeballs
-                sock, _, _ = await staggered.staggered_race(
+                sock, _, _ = await asyncio.staggered_race(
                     (
                         functools.partial(
                             self._connect_sock, exceptions, addrinfo, laddr_infos
@@ -306,6 +323,7 @@ class SocketMixin:
             )
         return transport, protocol
 
+    @traceexceptions
     async def _create_connection_transport(
         self,
         sock,
@@ -342,6 +360,7 @@ class SocketMixin:
 
         return transport, protocol
 
+    @traceexceptions
     async def sendfile(self, transport, file, offset=0, count=None, *, fallback=True):
         """Send a file to transport.
 
@@ -387,6 +406,7 @@ class SocketMixin:
 
         return await self._sendfile_fallback(transport, file, offset, count)
 
+    @traceexceptions
     async def _sendfile_fallback(self, transp, file, offset, count):
         if offset:
             file.seek(offset)
@@ -412,6 +432,7 @@ class SocketMixin:
                 file.seek(offset + total_sent)
             await proto.restore()
 
+    @traceexceptions
     async def start_tls(
         self,
         transport,
@@ -469,6 +490,7 @@ class SocketMixin:
 
         return ssl_protocol._app_transport
 
+    @traceexceptions
     async def create_datagram_endpoint(
         self,
         protocol_factory,
@@ -554,7 +576,6 @@ class SocketMixin:
                             type=socket.SOCK_DGRAM,
                             proto=proto,
                             flags=flags,
-                            loop=self,
                         )
                         if not infos:
                             raise OSError("getaddrinfo() returned empty list")
@@ -659,6 +680,7 @@ class SocketMixin:
 
         return transport, protocol
 
+    @traceexceptions
     async def _ensure_resolved(
         self,
         address,
@@ -667,7 +689,6 @@ class SocketMixin:
         type=socket.SOCK_STREAM,  # noqa: A002
         proto=0,
         flags=0,
-        loop,
     ):
         host, port = address[:2]
         info = _ipaddr_info(host, port, family, type, proto, *address[2:])
@@ -675,10 +696,11 @@ class SocketMixin:
             # "host" is already a resolved IP.
             return [info]
         else:
-            return await loop.getaddrinfo(
+            return await self.getaddrinfo(
                 host, port, family=family, type=type, proto=proto, flags=flags
             )
 
+    @traceexceptions
     async def _create_server_getaddrinfo(self, host, port, family, flags):
         infos = await self._ensure_resolved(
             (host, port), family=family, type=socket.SOCK_STREAM, flags=flags, loop=self
@@ -687,6 +709,7 @@ class SocketMixin:
             raise OSError(f"getaddrinfo({host!r}) returned empty list")
         return infos
 
+    @traceexceptions
     async def create_server(
         self,
         protocol_factory,
@@ -731,7 +754,7 @@ class SocketMixin:
                 )
 
             if reuse_address is None:
-                reuse_address = os.name == "posix" and sys.platform != "cygwin"
+                reuse_address = True
             sockets = []
             if host == "":
                 hosts = [None]
@@ -813,6 +836,7 @@ class SocketMixin:
             logger.info("%r is serving", server)
         return server
 
+    @traceexceptions
     async def connect_accepted_socket(
         self, protocol_factory, sock, *, ssl=None, ssl_handshake_timeout=None
     ):
@@ -845,6 +869,7 @@ class SocketMixin:
             logger.debug("%r handled: (%r, %r)", sock, transport, protocol)
         return transport, protocol
 
+    @traceexceptions
     def _ensure_fd_no_transport(self, fd):
         fileno = _fileobj_to_fd(fd)
 
@@ -858,19 +883,21 @@ class SocketMixin:
                     f"File descriptor {fd!r} is used by transport " f"{transport!r}"
                 )
 
+    @traceexceptions
     def _add_reader(self, fd, callback, *args):
         self._check_closed()
         handle = asyncio.Handle(callback, args, self, None)
         try:
             key = self._selector.get_key(fd)
         except KeyError:
-            self._selector.register(fd, kCFSocketReadCallBack, (handle, None))
+            self._selector.register(fd, EVENT_READ, (handle, None))
         else:
             mask, (reader, writer) = key.events, key.data
-            self._selector.modify(fd, mask | kCFSocketReadCallBack, (handle, writer))
+            self._selector.modify(fd, mask | EVENT_READ, (handle, writer))
             if reader is not None:
                 reader.cancel()
 
+    @traceexceptions
     def _remove_reader(self, fd):
         if self.is_closed():
             return False
@@ -880,7 +907,7 @@ class SocketMixin:
             return False
         else:
             mask, (reader, writer) = key.events, key.data
-            mask &= ~kCFSocketReadCallBack
+            mask &= ~EVENT_READ
             if not mask:
                 self._selector.unregister(fd)
             else:
@@ -892,19 +919,21 @@ class SocketMixin:
             else:
                 return False
 
+    @traceexceptions
     def _add_writer(self, fd, callback, *args):
         self._check_closed()
         handle = asyncio.Handle(callback, args, self, None)
         try:
             key = self._selector.get_key(fd)
         except KeyError:
-            self._selector.register(fd, kCFSocketWriteCallBack, (None, handle))
+            self._selector.register(fd, EVENT_WRITE, (None, handle))
         else:
             mask, (reader, writer) = key.events, key.data
-            self._selector.modify(fd, mask | kCFSocketWriteCallBack, (reader, handle))
+            self._selector.modify(fd, mask | EVENT_WRITE, (reader, handle))
             if writer is not None:
                 writer.cancel()
 
+    @traceexceptions
     def _remove_writer(self, fd):
         """Remove a writer callback."""
         if self.is_closed():
@@ -916,7 +945,7 @@ class SocketMixin:
         else:
             mask, (reader, writer) = key.events, key.data
             # Remove both writer and connector.
-            mask &= ~kCFSocketWriteCallBack
+            mask &= ~EVENT_WRITE
             if not mask:
                 self._selector.unregister(fd)
             else:
@@ -928,21 +957,25 @@ class SocketMixin:
             else:
                 return False
 
+    @traceexceptions
     def add_reader(self, fd, callback, *args):
         """Add a reader callback."""
         self._ensure_fd_no_transport(fd)
         return self._add_reader(fd, callback, *args)
 
+    @traceexceptions
     def remove_reader(self, fd):
         """Remove a reader callback."""
         self._ensure_fd_no_transport(fd)
         return self._remove_reader(fd)
 
+    @traceexceptions
     def add_writer(self, fd, callback, *args):
         """Add a writer callback.."""
         self._ensure_fd_no_transport(fd)
         return self._add_writer(fd, callback, *args)
 
+    @traceexceptions
     def remove_writer(self, fd):
         """Remove a writer callback."""
         self._ensure_fd_no_transport(fd)
@@ -950,6 +983,7 @@ class SocketMixin:
 
     # Working with socket objects directly
 
+    @traceexceptions
     async def sock_recv(self, sock, n):
         """Receive data from the socket.
 
@@ -970,9 +1004,11 @@ class SocketMixin:
         fut.add_done_callback(functools.partial(self._sock_read_done, fd))
         return await fut
 
+    @traceexceptions
     def _sock_read_done(self, fd, fut):
         self.remove_reader(fd)
 
+    @traceexceptions
     def _sock_recv(self, fut, sock, n):
         # _sock_recv() can add itself as an I/O callback if the operation can't
         # be done immediately. Don't use it directly, call sock_recv().
@@ -989,6 +1025,7 @@ class SocketMixin:
         else:
             fut.set_result(data)
 
+    @traceexceptions
     async def sock_recv_into(self, sock, buf):
         """Receive data from the socket.
 
@@ -1008,6 +1045,7 @@ class SocketMixin:
         fut.add_done_callback(functools.partial(self._sock_read_done, fd))
         return await fut
 
+    @traceexceptions
     def _sock_recv_into(self, fut, sock, buf):
         # _sock_recv_into() can add itself as an I/O callback if the operation
         # can't be done immediately. Don't use it directly, call
@@ -1025,6 +1063,7 @@ class SocketMixin:
         else:
             fut.set_result(nbytes)
 
+    @traceexceptions
     async def sock_sendall(self, sock, data):
         """Send data to the socket.
 
@@ -1053,6 +1092,7 @@ class SocketMixin:
         self.add_writer(fd, self._sock_sendall, fut, sock, memoryview(data), [n])
         return await fut
 
+    @traceexceptions
     def _sock_sendall(self, fut, sock, view, pos):
         if fut.done():
             # Future cancellation can be scheduled on previous loop iteration
@@ -1075,6 +1115,7 @@ class SocketMixin:
         else:
             pos[0] = start
 
+    @traceexceptions
     async def sock_connect(self, sock, address):
         """Connect to a remote socket at address.
 
@@ -1086,7 +1127,7 @@ class SocketMixin:
 
         if not hasattr(socket, "AF_UNIX") or sock.family != socket.AF_UNIX:
             resolved = await self._ensure_resolved(
-                address, family=sock.family, proto=sock.proto, loop=self
+                address, family=sock.family, proto=sock.proto
             )
             _, _, _, _, address = resolved[0]
 
@@ -1094,11 +1135,13 @@ class SocketMixin:
         self._sock_connect(fut, sock, address)
         return await fut
 
+    @traceexceptions
     def _sock_connect(self, fut, sock, address):
         fd = sock.fileno()
         try:
             sock.connect(address)
         except (BlockingIOError, InterruptedError):
+            print("Need to wait")
             # Issue #23618: When the C function connect() fails with EINTR, the
             # connection runs in background. We have to wait until the socket
             # becomes writable to be notified when the connection succeed or
@@ -1106,15 +1149,20 @@ class SocketMixin:
             fut.add_done_callback(functools.partial(self._sock_write_done, fd))
             self.add_writer(fd, self._sock_connect_cb, fut, sock, address)
         except (SystemExit, KeyboardInterrupt):
+            print("Exit")
             raise
         except BaseException as exc:
+            print("Exception!", exc)
             fut.set_exception(exc)
         else:
+            print("Done")
             fut.set_result(None)
 
+    @traceexceptions
     def _sock_write_done(self, fd, fut):
         self.remove_writer(fd)
 
+    @traceexceptions
     def _sock_connect_cb(self, fut, sock, address):
         if fut.done():
             return
@@ -1134,6 +1182,7 @@ class SocketMixin:
         else:
             fut.set_result(None)
 
+    @traceexceptions
     async def sock_accept(self, sock):
         """Accept a connection.
 
@@ -1149,6 +1198,7 @@ class SocketMixin:
         self._sock_accept(fut, False, sock)
         return await fut
 
+    @traceexceptions
     def _sock_accept(self, fut, registered, sock):
         fd = sock.fileno()
         if registered:
@@ -1167,6 +1217,7 @@ class SocketMixin:
         else:
             fut.set_result((conn, address))
 
+    @traceexceptions
     async def _sendfile_native(self, transp, file, offset, count):
         del self._transports[transp._sock_fd]
         resume_reading = transp.is_reading()

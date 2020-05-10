@@ -8,9 +8,11 @@ def traceexceptions(function):
 
         @functools.wraps(function)
         async def wrapper(*args, **kwds):
-            # print(function, args, kwds)
+            print(">", function.__name__, args, kwds)
             try:
-                return await function(*args, **kwds)
+                result = await function(*args, **kwds)
+                print("<  ", function.__name__, args, kwds, "->", result)
+                return result
 
             except:  # noqa: B001, E722
                 traceback.print_exc()
@@ -20,9 +22,11 @@ def traceexceptions(function):
 
         @functools.wraps(function)
         def wrapper(*args, **kwds):
-            # print(function, args, kwds)
+            print(">", function.__name__, args, kwds)
             try:
-                return function(*args, **kwds)
+                result = function(*args, **kwds)
+                print("<  ", function.__name__, args, kwds, "->", result)
+                return result
 
             except:  # noqa: B001, E722
                 traceback.print_exc()
