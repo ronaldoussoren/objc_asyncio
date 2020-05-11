@@ -77,26 +77,28 @@ async def executor():
 
 async def basic_socket():
     try:
-        print(f"Opening connection")
-        # reader, writer = await asyncio.open_connection('131.224.245.85', 80)
 
-        host = "131.224.245.85"
+        host = "www.python.org"
         port = 80
 
-        reader = asyncio.StreamReader(limit=1000, loop=el)
-        print("reader", reader)
-        protocol = asyncio.StreamReaderProtocol(reader, loop=el)
-        print("protocol", protocol)
-        transport, _ = await el.create_connection(lambda: protocol, host, port)
-        print("transport", transport)
-        writer = asyncio.StreamWriter(transport, protocol, reader, el)
-        print("writer", writer)
+        print(f"Opening connection to {host}:{port}")
+
+        reader, writer = await asyncio.open_connection(host, port)
+
+        # reader = asyncio.StreamReader(limit=1000, loop=el)
+        # print("reader", reader)
+        # protocol = asyncio.StreamReaderProtocol(reader, loop=el)
+        # print("protocol", protocol)
+        # transport, _ = await el.create_connection(lambda: protocol, host, port)
+        # print("transport", transport)
+        # writer = asyncio.StreamWriter(transport, protocol, reader, el)
+        # print("writer", writer)
 
         print(f"Sending request")
-        writer.write(b"GET / HTTP/1.0\r\nHost: www.rivm.nl\r\n\r\n")
+        writer.write(b"GET / HTTP/1.0\r\nHost: %s\r\n\r\n" % (host.encode("utf-8"),))
         await writer.drain()
 
-        data = await reader.read(200)
+        data = await reader.read(800000)
         print(f"Received: {data.decode()!r}")
 
         print("Close the connection")
