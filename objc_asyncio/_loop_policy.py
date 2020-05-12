@@ -1,21 +1,20 @@
 import asyncio
 import threading
+import typing
 
 from ._loop import PyObjCEventLoop
 
 
 class PyObjCEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
-    _loop_factory = PyObjCEventLoop
-
     class _Local(threading.local):
         _loop = None
         _set_called = False
 
     def __init__(self):
         self._local = self._Local()
-        self._watcher = None
+        self._watcher: typing.Optional[asyncio.AbstractChildWatcher] = None
 
-    def get_event_loop(self):
+    def get_event_loop(self) -> asyncio.AbstractEventLoop:
         """Get the event loop for the current context.
 
         Returns an instance of EventLoop or raises an exception.
@@ -35,7 +34,7 @@ class PyObjCEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
 
         return self._local._loop
 
-    def set_event_loop(self, loop):
+    def set_event_loop(self, loop: typing.Optional[asyncio.AbstractEventLoop]) -> None:
         """Set the event loop.
 
         As a side effect, if a child watcher was set before, then calling
@@ -52,22 +51,22 @@ class PyObjCEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
         ):
             self._watcher.attach_loop(loop)
 
-    def new_event_loop(self):
+    def new_event_loop(self) -> PyObjCEventLoop:
         """Create a new event loop.
 
         You must call set_event_loop() to make this the current event
         loop.
         """
-        return self._loop_factory()
+        return PyObjCEventLoop()
 
-    def _init_watcher(self):
+    def _init_watcher(self) -> None:
         # with asyncio._lock: # XXX
         if self._watcher is None:  # pragma: no branch
             self._watcher = asyncio.ThreadedChildWatcher()
             if threading.current_thread() is threading.main_thread():
                 self._watcher.attach_loop(self._local._loop)
 
-    def get_child_watcher(self):
+    def get_child_watcher(self) -> asyncio.AbstractChildWatcher:
         """Get the watcher for child processes.
 
         If not yet set, a ThreadedChildWatcher object is automatically created.
@@ -75,9 +74,10 @@ class PyObjCEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
         if self._watcher is None:
             self._init_watcher()
 
+        assert self._watcher is not None
         return self._watcher
 
-    def set_child_watcher(self, watcher):
+    def set_child_watcher(self, watcher: asyncio.AbstractChildWatcher):
         """Set the watcher for child processes."""
 
         assert watcher is None or isinstance(watcher, asyncio.AbstractChildWatcher)

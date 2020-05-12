@@ -1,13 +1,20 @@
+import asyncio
 import traceback
+import typing
 
 from ._log import logger
+
+_Context = typing.Dict[str, typing.Any]
+_ExceptionHandler = typing.Callable[[asyncio.AbstractEventLoop, _Context], typing.Any]
 
 
 class ExceptionHandlerMixin:
     def __init__(self):
         self._exception_handler = None
 
-    def set_exception_handler(self, handler):
+    def set_exception_handler(
+        self, handler: typing.Optional[_ExceptionHandler]
+    ) -> None:
         """Set handler as the new event loop exception handler.
 
         If handler is None, the default exception handler will
@@ -21,12 +28,12 @@ class ExceptionHandlerMixin:
         """
         self._exception_handler = handler
 
-    def get_exception_handler(self):
+    def get_exception_handler(self) -> typing.Optional[_ExceptionHandler]:
         """Return an exception handler, or None if the default one is in use.
         """
         return self._exception_handler
 
-    def default_exception_handler(self, context):
+    def default_exception_handler(self, context: _Context):
         """Default exception handler.
 
         This is called when an exception occurs and no exception
@@ -46,6 +53,10 @@ class ExceptionHandlerMixin:
             message = "Unhandled exception in event loop"
 
         exception = context.get("exception")
+        exc_info: typing.Union[
+            typing.Literal[False],
+            typing.Tuple[typing.Type[typing.Any], typing.Any, typing.Any],
+        ]
         if exception is not None:
             exc_info = (type(exception), exception, exception.__traceback__)
         else:
@@ -77,7 +88,7 @@ class ExceptionHandlerMixin:
 
         logger.error("\n".join(log_lines), exc_info=exc_info)
 
-    def call_exception_handler(self, context):
+    def call_exception_handler(self, context: _Context):
         """Call the current event loop's exception handler.
 
         The context argument is a dict containing the following keys:

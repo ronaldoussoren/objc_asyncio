@@ -7,6 +7,8 @@ APIs are used as a selector, but that the
 actual I/O will be performed using the
 regular Python APIs.
 """
+import enum
+import typing
 from collections import namedtuple
 from selectors import _SelectorMapping
 
@@ -27,17 +29,22 @@ SelectorKey = namedtuple(
 )
 
 
-EVENT_READ = kCFFileDescriptorReadCallBack
-EVENT_WRITE = kCFFileDescriptorWriteCallBack
+class Events(enum.IntFlag):
+    EVENT_READ = kCFFileDescriptorReadCallBack
+    EVENT_WRITE = kCFFileDescriptorWriteCallBack
+
+
+EVENT_READ = Events.EVENT_READ
+EVENT_WRITE = Events.EVENT_WRITE
 
 ALL_EVENTS = EVENT_READ | EVENT_WRITE
 
 
-def _valid_events(events):
+def _valid_events(events: Events):
     return (events != 0) and ((events & ALL_EVENTS) == events)
 
 
-def _fileobj_to_fd(fileobj):
+def _fileobj_to_fd(fileobj: typing.Union[int, typing.IO]):
     if isinstance(fileobj, int):
         fd = fileobj
     else:
