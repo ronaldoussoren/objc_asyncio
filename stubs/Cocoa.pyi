@@ -1,5 +1,5 @@
 """
-Minimal typing stub for Cocoa
+Minimal typing stub for Cocoa as used by objc_asyncio
 """
 import typing
 import typing_extensions
