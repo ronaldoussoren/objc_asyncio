@@ -188,7 +188,7 @@ class PyObjCEventLoop(
     # Running and stopping the loop
 
     def run_until_complete(self, future):
-        future.add_done_callback(lambda: self.stop())
+        future.add_done_callback(lambda _: self.stop())
         self.run_forever()
 
         return future.result()
@@ -345,7 +345,7 @@ class PyObjCEventLoop(
 
     def create_task(self, coro, *, name=None):
         if self._task_factory is not None:
-            task = self._task_factory(coro)
+            task = self._task_factory(self, coro)
             if name is not None:
                 task.set_name(name)
             return task
@@ -354,6 +354,8 @@ class PyObjCEventLoop(
             return asyncio.Task(coro, loop=self, name=name)
 
     def set_task_factory(self, factory):
+        if factory is not None and not callable(factory):
+            raise TypeError("task factory must be a callable or None")
         self._task_factory = factory
 
     def get_task_factory(self):
