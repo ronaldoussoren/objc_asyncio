@@ -1,25 +1,28 @@
+import asyncio
 import signal
+import unittest
 
-from functool import wraps
+import objc_asyncio
+
+MAX_TEST_TIME = 30
 
 
-def timed_function(delay):
-    """
-    Abort the current process when de decorated function doesn't
-    return within *delay* seconds.
-    """
-    # NOTE: This does not set a signal handler for SIGALRM because
-    # this is used to abort code that might block inside Cocoa
-    # APIs.
-    def decorator(function):
-        @wraps(function)
-        def around(*args, **kwds):
-            signal.alarm(delay)
-            try:
-                return function(*args, **kwds)
-            finally:
-                signal.alarm(0)
+class TestCase(unittest.TestCase):
+    def setUp(self):
+        # Ensure the process is killed when a test takes
+        # too much time.
+        signal.alarm(MAX_TEST_TIME)
 
-        return around
+        self.loop = objc_asyncio.PyObjCEventLoop()
+        asyncio.set_event_loop(self.loop)
 
-    return decorator
+    def tearDown(self):
+        if self.loop._default_executor is not None:
+            if self.loop.is_closed():
+                self.loop._default_executor.shutdown(wait=True)
+            else:
+                self.loop.run_until_complete(self.loop.shutdown_default_executor())
+
+        self.loop.close()
+        asyncio.set_event_loop(None)
+        signal.alarm(0)

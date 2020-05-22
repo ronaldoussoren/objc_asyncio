@@ -1,49 +1,29 @@
 import asyncio
-import signal
-import unittest
 
-import objc_asyncio
+from . import utils
 
 
-class TestFuturesAndTasks(unittest.TestCase):
-    def setUp(self):
-        signal.alarm(2)
-
-    def tearDown(self):
-        signal.alarm(0)
-
+class TestFuturesAndTasks(utils.TestCase):
     def test_create_future(self):
-        loop = objc_asyncio.PyObjCEventLoop()
-        asyncio.set_event_loop(loop)
-        self.addCleanup(loop.close)
-
-        future = loop.create_future()
+        future = self.loop.create_future()
         self.assertIsInstance(future, asyncio.Future)
 
-        self.assertIs(future.get_loop(), loop)
+        self.assertIs(future.get_loop(), self.loop)
 
     def test_create_task_default(self):
-        loop = objc_asyncio.PyObjCEventLoop()
-        asyncio.set_event_loop(loop)
-        self.addCleanup(loop.close)
-
         async def coro():
             pass
 
-        task = loop.create_task(coro())
+        task = self.loop.create_task(coro())
         self.assertIsInstance(task, asyncio.Task)
-        loop.run_until_complete(task)
+        self.loop.run_until_complete(task)
 
-        task = loop.create_task(coro(), name="My Name")
+        task = self.loop.create_task(coro(), name="My Name")
         self.assertIsInstance(task, asyncio.Task)
         self.assertEqual(task.get_name(), "My Name")
-        loop.run_until_complete(task)
+        self.loop.run_until_complete(task)
 
     def test_create_task_with_factory(self):
-        loop = objc_asyncio.PyObjCEventLoop()
-        asyncio.set_event_loop(loop)
-        self.addCleanup(loop.close)
-
         async def coro():
             pass
 
@@ -54,31 +34,27 @@ class TestFuturesAndTasks(unittest.TestCase):
             self.assertIs(loop, loop)
             return MyTask(coro, loop=loop)
 
-        loop.set_task_factory(factory)
-        task = loop.create_task(coro())
+        self.loop.set_task_factory(factory)
+        task = self.loop.create_task(coro())
         self.assertIsInstance(task, MyTask)
-        loop.run_until_complete(task)
+        self.loop.run_until_complete(task)
 
-        task = loop.create_task(coro(), name="My Name")
+        task = self.loop.create_task(coro(), name="My Name")
         self.assertIsInstance(task, MyTask)
         self.assertEqual(task.get_name(), "My Name")
-        loop.run_until_complete(task)
+        self.loop.run_until_complete(task)
 
     def test_task_factory(self):
-        loop = objc_asyncio.PyObjCEventLoop()
-        asyncio.set_event_loop(loop)
-        self.addCleanup(loop.close)
-
-        self.assertIs(loop.get_task_factory(), None)
+        self.assertIs(self.loop.get_task_factory(), None)
 
         with self.assertRaises(TypeError):
-            loop.set_task_factory(1)
+            self.loop.set_task_factory(1)
 
         def factory(loop, coro):
             pass
 
-        loop.set_task_factory(factory)
-        self.assertIs(loop.get_task_factory(), factory)
+        self.loop.set_task_factory(factory)
+        self.assertIs(self.loop.get_task_factory(), factory)
 
-        loop.set_task_factory(None)
-        self.assertIs(loop.get_task_factory(), None)
+        self.loop.set_task_factory(None)
+        self.assertIs(self.loop.get_task_factory(), None)

@@ -61,6 +61,17 @@ def _format_handle(handle):
         return str(handle)
 
 
+def _run_until_complete_cb(fut):
+    if not fut.cancelled():
+        exc = fut.exception()
+        if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            # Issue #22429: run_forever() already finished, no need to
+            # stop it.
+            return
+
+    fut.get_loop().stop()
+
+
 class PyObjCEventLoop(
     SocketMixin,
     ExecutorMixin,
@@ -188,8 +199,32 @@ class PyObjCEventLoop(
     # Running and stopping the loop
 
     def run_until_complete(self, future):
-        future.add_done_callback(lambda _: self.stop())
-        self.run_forever()
+        self._check_closed()
+        # self._check_running()
+
+        new_task = not asyncio.isfuture(future)
+        future = asyncio.ensure_future(future, loop=self)
+        if new_task:
+            # An exception is raised if the future didn't complete, so there
+            # is no need to log the "destroy pending task" message
+            future._log_destroy_pending = False
+        future.add_done_callback(_run_until_complete_cb)
+
+        try:
+            self.run_forever()
+        except:  # noqa: B001
+            if new_task and future.done() and not future.cancelled():
+                # The coroutine raised a BaseException. Consume the exception
+                # to not log a warning, the caller doesn't have access to the
+                # local task.
+                future.exception()
+            raise
+
+        finally:
+            future.remove_done_callback(_run_until_complete_cb)
+
+        if not future.done():
+            raise RuntimeError("Event loop stopped before Future completed")
 
         return future.result()
 
