@@ -23,14 +23,30 @@ class ResolverMixin:
         logger.debug("Get address info %s", msg)
 
         t0 = self.time()
-        addrinfo = socket.getaddrinfo(host, port, family, type, proto, flags)
-        dt = self.time() - t0
+        try:
+            addrinfo = socket.getaddrinfo(host, port, family, type, proto, flags)
 
-        msg = f"Getting address info {msg} took {dt * 1e3:.3f}ms: {addrinfo!r}"
-        if dt >= self.slow_callback_duration:
-            logger.info(msg)
+        except socket.error as exc:
+            dt = self.time() - t0
+
+            msg = f"Getting address info {msg} failed in {dt * 1e3:.3f}ms: {exc!r}"
+
+            if dt >= self.slow_callback_duration:
+                logger.info(msg)
+            else:
+                logger.debug(msg)
+
+            raise
+
         else:
-            logger.debug(msg)
+            dt = self.time() - t0
+
+            msg = f"Getting address info {msg} took {dt * 1e3:.3f}ms: {addrinfo!r}"
+
+            if dt >= self.slow_callback_duration:
+                logger.info(msg)
+            else:
+                logger.debug(msg)
         return addrinfo
 
     async def getaddrinfo(

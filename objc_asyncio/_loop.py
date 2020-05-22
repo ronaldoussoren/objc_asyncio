@@ -129,6 +129,10 @@ class PyObjCEventLoop(
         self._internal_fds = 0
         # self._make_self_pipe()
 
+        # In debug mode, if the execution of a callback or a step of a task
+        # exceed this duration in seconds, the slow callback/task is logged.
+        self.slow_callback_duration = 0.1
+
         ExceptionHandlerMixin.__init__(self)
         ExecutorMixin.__init__(self)
         SocketMixin.__init__(self)
