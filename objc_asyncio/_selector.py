@@ -89,9 +89,8 @@ class RunLoopSelector:
         # CFFileDescriptor disables events once triggered, our
         # contract is that events will keep getting triggered
         # until explicitly disabled.
-        # CFFileDescriptorEnableCallBacks(key.cffd, key.events)
-
         self._eventloop._io_event(callbackTypes, key)
+        CFFileDescriptorEnableCallBacks(key.cffd, key.events)
 
     def _set_events(self, cffd, old_events, new_events):
         if old_events:
@@ -148,6 +147,7 @@ class RunLoopSelector:
             key = key._replace(data=data)
             self._fd_to_key[key.fd] = key
 
+        self._set_events(key.cffd, key.events, 0)
         return key
 
     def get_key(self, fileobj):
