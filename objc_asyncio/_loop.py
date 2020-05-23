@@ -41,6 +41,14 @@ _unset = object()
 _POSIX_TO_CFTIME = 978307200
 _EPSILON = 1e-6
 
+# Minimum number of _scheduled timer handles before cleanup of
+# cancelled handles is performed.
+_MIN_SCHEDULED_TIMER_HANDLES = 100
+
+# Minimum fraction of _scheduled timer handles that are cancelled
+# before cleanup of cancelled handles is performed.
+_MIN_CANCELLED_TIMER_HANDLES_FRACTION = 0.5
+
 
 def posix2cftime(posixtime):
     """ Convert a POSIX timestamp to a CFAbsoluteTime timestamp """
@@ -116,6 +124,7 @@ class PyObjCEventLoop(
         self._asyncgens_shutdown_called = False
         self._ready = collections.deque()
         self._current_handle = None
+        self._timer_cancelled_count = 0
 
         self._task_factory = None
         self._exception_handler = None
@@ -163,6 +172,31 @@ class PyObjCEventLoop(
             asyncio._set_running_loop(None)
 
         elif activity == kCFRunLoopBeforeTimers:
+            timer_count = len(self._timer_q)
+            if (
+                timer_count > _MIN_SCHEDULED_TIMER_HANDLES
+                and self._timer_cancelled_count / timer_count
+                > _MIN_CANCELLED_TIMER_HANDLES_FRACTION
+            ):
+                # Remove delayed calls that were cancelled if their number
+                # is too high
+                new_timer_q = []
+                for handle in self._timer_q:
+                    if handle._cancelled:
+                        handle._scheduled = False
+                    else:
+                        new_timer_q.append(handle)
+
+                heapq.heapify(new_timer_q)
+                self._new_timer_q = new_timer_q
+                self._timer_cancelled_count = 0
+            else:
+                # Remove delayed calls that were cancelled from head of queue.
+                while self._timer_q and self._timer_q[0]._cancelled:
+                    self._timer_cancelled_count -= 1
+                    handle = heapq.heappop(self._timer_q)
+                    handle._scheduled = False
+
             # This is the only place where callbacks are actually *called*.
             # All other places just add them to ready.
             # Note: We run all currently scheduled callbacks, but not any
@@ -346,7 +380,7 @@ class PyObjCEventLoop(
         while self._timer_q and self._timer_q[0].when() <= self.time() + _EPSILON:
             handle = heapq.heappop(self._timer_q)
             if handle.cancelled():
-                return
+                continue
 
             handle._run()
 
@@ -411,8 +445,12 @@ class PyObjCEventLoop(
     # Executing code in thread or process pools
 
     def _timer_handle_cancelled(self, handle):
-        if handle._scheduled:
-            self._timer_cancelled_count += 1
+        try:
+            if handle._scheduled:
+                self._timer_cancelled_count += 1
+
+        except Exception as exc:
+            print("Exception", exc)
 
     def _check_callback(self, callback, method):
         if asyncio.iscoroutine(callback) or asyncio.iscoroutinefunction(callback):

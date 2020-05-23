@@ -34,6 +34,18 @@ class TestExecutor(utils.TestCase):
         result = self.loop.run_until_complete(awaitable)
         self.assertEqual(result, 42)
 
+    def test_run_in_executor_with_exception(self):
+        class MyException(Exception):
+            pass
+
+        def func():
+            raise MyException
+
+        awaitable = self.loop.run_in_executor(None, func)
+
+        with self.assertRaises(MyException):
+            self.loop.run_until_complete(awaitable)
+
     def test_run_in_executor_explicit_default(self):
         executor = concurrent.futures.ThreadPoolExecutor()
         self.loop.set_default_executor(executor)
@@ -84,6 +96,22 @@ class TestExecutor(utils.TestCase):
         stop = time.time()
 
         self.assertGreater(stop - start, 0.5)
+
+        result = self.loop.run_until_complete(awaitable)
+        self.assertEqual(result, None)
+
+    def test_shutdown_failed(self):
+        self.assertFalse(self.loop._executor_shutdown_called)
+        awaitable = self.loop.run_in_executor(None, lambda: time.sleep(1))
+
+        class MyException(Exception):
+            pass
+
+        with unittest.mock.patch.object(
+            self.loop._default_executor, "shutdown", side_effect=MyException()
+        ):
+            with self.assertRaises(MyException):
+                self.loop.run_until_complete(self.loop.shutdown_default_executor())
 
         result = self.loop.run_until_complete(awaitable)
         self.assertEqual(result, None)

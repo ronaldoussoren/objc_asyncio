@@ -1,56 +1,67 @@
-import unittest
+import io
+import logging
 
-from objc_asyncio import _exceptionhandler as mod
+from objc_asyncio._log import logger
 
-
-class EHLoop(mod.ExceptionHandlerMixin):
-    """Minimal loop to facilitate testing"""
-
-    def __init__(self, debug=False):
-        self._debug = debug
-        self._current_handle = None
-
-        mod.ExceptionHandlerMixin.__init__(self)
+from . import utils
 
 
-class TestExceptionHandler(unittest.TestCase):
+class TestExceptionHandler(utils.TestCase):
     def test_setting_handler(self):
-        loop = EHLoop()
-
-        self.assertIs(loop.get_exception_handler(), None)
+        self.assertIs(self.loop.get_exception_handler(), None)
 
         def handler(loop, context):
             pass
 
-        loop.set_exception_handler(handler)
+        self.loop.set_exception_handler(handler)
 
-        self.assertIs(loop.get_exception_handler(), handler)
+        self.assertIs(self.loop.get_exception_handler(), handler)
 
-        loop.set_exception_handler(None)
+        self.loop.set_exception_handler(None)
 
-        self.assertIs(loop.get_exception_handler(), None)
+        self.assertIs(self.loop.get_exception_handler(), None)
 
     def test_calling_handler(self):
-        loop = EHLoop()
-
         handled = []
 
         def handler(loop, context):
             handled.append((loop, context))
 
-        loop.set_exception_handler(handler)
+        self.loop.set_exception_handler(handler)
 
         context = {"a": "b"}
 
-        loop.call_exception_handler(context)
-        self.assertEqual(handled, [(loop, context)])
+        self.loop.call_exception_handler(context)
+        self.assertEqual(handled, [(self.loop, context)])
+
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        logger.addHandler(handler)
+        self.addCleanup(logger.removeHandler, handler)
 
         # Make sure exceptions are swallowed
         handled = None
-        loop.call_exception_handler(context)
+        self.loop.call_exception_handler(context)
         self.assertIs(handled, None)
 
-        # XXX: This should test that the exception is logged!
+        contents = stream.getvalue()
+
+        self.assertIn("Unhandled error in exception handler", contents)
+        self.assertIn("AttributeError", contents)
 
     def test_default_handler(self):
-        pass
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        logger.addHandler(handler)
+        self.addCleanup(logger.removeHandler, handler)
+
+        context = {"attribute": "value", "dogs": "cats"}
+        self.loop.call_exception_handler(context)
+
+        contents = stream.getvalue()
+
+        self.assertIn("Unhandled exception in event loop", contents)
+        self.assertIn("attribute", contents)
+        self.assertIn("value", contents)
+        self.assertIn("dogs", contents)
+        self.assertIn("cats", contents)

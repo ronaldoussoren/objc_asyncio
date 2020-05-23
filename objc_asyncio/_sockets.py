@@ -6,6 +6,7 @@ import collections
 import functools
 import itertools
 import os
+import selectors
 import socket
 import ssl
 import stat
@@ -15,9 +16,19 @@ from asyncio import constants  # XXX
 from asyncio.base_events import Server, _SendfileFallbackProtocol  # XXX
 from asyncio.selector_events import _SelectorSocketTransport
 
+from Cocoa import (
+    CFFileDescriptorCreate,
+    CFFileDescriptorCreateRunLoopSource,
+    CFFileDescriptorEnableCallBacks,
+    CFFileDescriptorInvalidate,
+    CFRunLoopAddSource,
+    CFRunLoopRemoveSource,
+    kCFFileDescriptorReadCallBack,
+    kCFRunLoopCommonModes,
+)
+
 from ._log import logger
 from ._resolver import _interleave_addrinfos, _ipaddr_info
-from ._selector import EVENT_READ, EVENT_WRITE, RunLoopSelector, _fileobj_to_fd
 
 _unset = object()
 
@@ -33,26 +44,53 @@ def _check_ssl_socket(sock):
 
 class SocketMixin:
     def __init__(self):
-        self._selector = RunLoopSelector(self)
+        self._selector = selectors.KqueueSelector()
         self._transports = weakref.WeakValueDictionary()
 
+        self._selector_fd = CFFileDescriptorCreate(
+            None, self._selector.fileno(), False, self._selector_callout, None
+        )
+        self._selector_source = CFFileDescriptorCreateRunLoopSource(
+            None, self._selector_fd, 0
+        )
+        CFRunLoopAddSource(self._loop, self._selector_source, kCFRunLoopCommonModes)
+        CFFileDescriptorEnableCallBacks(
+            self._selector_fd, kCFFileDescriptorReadCallBack
+        )
+
     def close(self):
+        CFRunLoopRemoveSource(self._loop, self._selector_source, kCFRunLoopCommonModes)
+        CFFileDescriptorInvalidate(self._selector_fd)
+        self._selector_source = None
+        self._selector_fd = None
+
         if self._selector is not None:
             self._selector.close()
             self._selector = None
 
-    def _io_event(self, events, key):
-        fileobj, (reader, writer) = key.fileobj, key.data
-        if events & EVENT_READ and reader is not None:
-            if reader._cancelled:
-                self._remove_reader(fileobj)
-            else:
-                self._add_callback(reader)
-        if events & EVENT_WRITE and writer is not None:
-            if writer._cancelled:
-                self._remove_writer(fileobj)
-            else:
-                self._add_callback(writer)
+    def _selector_callout(self, cffd, callbackTypes, info):
+        try:
+            event_list = self._selector.select(0.0)
+            self._process_events(event_list)
+        finally:
+            CFFileDescriptorEnableCallBacks(
+                self._selector_fd, kCFFileDescriptorReadCallBack
+            )
+            pass
+
+    def _process_events(self, event_list):
+        for key, mask in event_list:
+            fileobj, (reader, writer) = key.fileobj, key.data
+            if mask & selectors.EVENT_READ and reader is not None:
+                if reader._cancelled:
+                    self._remove_reader(fileobj)
+                else:
+                    self._add_callback(reader)
+            if mask & selectors.EVENT_WRITE and writer is not None:
+                if writer._cancelled:
+                    self._remove_writer(fileobj)
+                else:
+                    self._add_callback(writer)
 
     def _make_socket_transport(
         self, sock, protocol, waiter=None, *, extra=None, server=None
@@ -852,7 +890,7 @@ class SocketMixin:
         return transport, protocol
 
     def _ensure_fd_no_transport(self, fd):
-        fileno = _fileobj_to_fd(fd)
+        fileno = selectors._fileobj_to_fd(fd)
 
         try:
             transport = self._transports[fileno]
@@ -870,10 +908,10 @@ class SocketMixin:
         try:
             key = self._selector.get_key(fd)
         except KeyError:
-            self._selector.register(fd, EVENT_READ, (handle, None))
+            self._selector.register(fd, selectors.EVENT_READ, (handle, None))
         else:
             mask, (reader, writer) = key.events, key.data
-            self._selector.modify(fd, mask | EVENT_READ, (handle, writer))
+            self._selector.modify(fd, mask | selectors.EVENT_READ, (handle, writer))
             if reader is not None:
                 reader.cancel()
 
@@ -886,7 +924,7 @@ class SocketMixin:
             return False
         else:
             mask, (reader, writer) = key.events, key.data
-            mask &= ~EVENT_READ
+            mask &= ~selectors.EVENT_READ
             if not mask:
                 self._selector.unregister(fd)
             else:
@@ -904,10 +942,10 @@ class SocketMixin:
         try:
             key = self._selector.get_key(fd)
         except KeyError:
-            self._selector.register(fd, EVENT_WRITE, (None, handle))
+            self._selector.register(fd, selectors.EVENT_WRITE, (None, handle))
         else:
             mask, (reader, writer) = key.events, key.data
-            self._selector.modify(fd, mask | EVENT_WRITE, (reader, handle))
+            self._selector.modify(fd, mask | selectors.EVENT_WRITE, (reader, handle))
             if writer is not None:
                 writer.cancel()
 
@@ -922,7 +960,7 @@ class SocketMixin:
         else:
             mask, (reader, writer) = key.events, key.data
             # Remove both writer and connector.
-            mask &= ~EVENT_WRITE
+            mask &= ~selectors.EVENT_WRITE
             if not mask:
                 self._selector.unregister(fd)
             else:
