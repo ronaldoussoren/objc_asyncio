@@ -1,9 +1,10 @@
 """
 Minimal typing stub for Cocoa as used by objc_asyncio
 """
-import typing
-import typing_extensions
 import enum
+import typing
+
+import typing_extensions
 
 def CFAbsoluteTimeGetCurrent() -> float: ...
 
@@ -91,3 +92,4 @@ def CFRunLoopAddSource(runloop: CFRunLoopRef, source: CFRunLoopSourceRef) -> Non
 def CFRunLoopRemoveSource(
     runloop: CFRunLoopRef, source: CFRunLoopSourceRef
 ) -> None: ...
+def CFFileDescriptorInvalidate(f: CFFileDescriptorRef) -> None: ...
