@@ -1,5 +1,6 @@
 import asyncio
 import signal
+import socket
 import unittest
 
 import objc_asyncio
@@ -26,3 +27,21 @@ class TestCase(unittest.TestCase):
         self.loop.close()
         asyncio.set_event_loop(None)
         signal.alarm(0)
+
+    def make_socketpair(
+        self, family=socket.AF_UNIX, type=socket.SOCK_STREAM, proto=0  # noqa: A002
+    ):
+        def close_socket(sd):
+            try:
+                sd.close()
+            except socket.error:
+                pass
+
+        sd1, sd2 = socket.socketpair(family, type, proto)
+        self.addCleanup(close_socket, sd1)
+        self.addCleanup(close_socket, sd2)
+
+        sd1.setblocking(False)
+        sd2.setblocking(False)
+
+        return sd1, sd2

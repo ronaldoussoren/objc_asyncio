@@ -23,6 +23,7 @@ from Cocoa import (
     CFFileDescriptorInvalidate,
     CFRunLoopAddSource,
     CFRunLoopRemoveSource,
+    CFRunLoopStop,
     kCFFileDescriptorReadCallBack,
     kCFRunLoopCommonModes,
 )
@@ -70,13 +71,20 @@ class SocketMixin:
 
     def _selector_callout(self, cffd, callbackTypes, info):
         try:
-            event_list = self._selector.select(0.0)
-            self._process_events(event_list)
-        finally:
-            CFFileDescriptorEnableCallBacks(
-                self._selector_fd, kCFFileDescriptorReadCallBack
-            )
-            pass
+            try:
+                event_list = self._selector.select(0.0)
+                self._process_events(event_list)
+            finally:
+                CFFileDescriptorEnableCallBacks(
+                    self._selector_fd, kCFFileDescriptorReadCallBack
+                )
+        except (KeyboardInterrupt, SystemExit) as exc:
+            # XXX: Maybe arrange for exception to be raised later...
+            CFRunLoopStop(self._loop)
+            self._exception = exc
+
+        except:  # noqa: E722, B001
+            logger.info(f"Unexpected exception", exc_info=True)
 
     def _process_events(self, event_list):
         for key, mask in event_list:
@@ -915,6 +923,10 @@ class SocketMixin:
             if reader is not None:
                 reader.cancel()
 
+        CFFileDescriptorEnableCallBacks(
+            self._selector_fd, kCFFileDescriptorReadCallBack
+        )
+
     def _remove_reader(self, fd):
         if self.is_closed():
             return False
@@ -936,6 +948,10 @@ class SocketMixin:
             else:
                 return False
 
+        CFFileDescriptorEnableCallBacks(
+            self._selector_fd, kCFFileDescriptorReadCallBack
+        )
+
     def _add_writer(self, fd, callback, *args):
         self._check_closed()
         handle = asyncio.Handle(callback, args, self, None)
@@ -948,6 +964,10 @@ class SocketMixin:
             self._selector.modify(fd, mask | selectors.EVENT_WRITE, (reader, handle))
             if writer is not None:
                 writer.cancel()
+
+        CFFileDescriptorEnableCallBacks(
+            self._selector_fd, kCFFileDescriptorReadCallBack
+        )
 
     def _remove_writer(self, fd):
         """Remove a writer callback."""
@@ -971,6 +991,10 @@ class SocketMixin:
                 return True
             else:
                 return False
+
+        CFFileDescriptorEnableCallBacks(
+            self._selector_fd, kCFFileDescriptorReadCallBack
+        )
 
     def add_reader(self, fd, callback, *args):
         """Add a reader callback."""
@@ -1008,6 +1032,7 @@ class SocketMixin:
             return sock.recv(n)
         except (BlockingIOError, InterruptedError):
             pass
+
         fut = self.create_future()
         fd = sock.fileno()
         self.add_reader(fd, self._sock_recv, fut, sock, n)

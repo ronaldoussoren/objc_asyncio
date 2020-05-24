@@ -7,6 +7,7 @@ import os
 import sys
 import warnings
 import weakref
+from asyncio.unix_events import _UnixReadPipeTransport, _UnixWritePipeTransport  # XXX
 
 from Cocoa import (
     CFAbsoluteTimeGetCurrent,
@@ -125,6 +126,7 @@ class PyObjCEventLoop(
         self._ready = collections.deque()
         self._current_handle = None
         self._timer_cancelled_count = 0
+        self._exception = None
 
         self._task_factory = None
         self._exception_handler = None
@@ -163,68 +165,77 @@ class PyObjCEventLoop(
         self._debug = bool(enabled)
 
     def _observer_loop(self, observer, activity):
-        if activity == kCFRunLoopEntry:
-            self._running = True
-            asyncio._set_running_loop(self)
+        try:
+            if activity == kCFRunLoopEntry:
+                self._running = True
+                asyncio._set_running_loop(self)
 
-        elif activity == kCFRunLoopExit:
-            self._running = False
-            asyncio._set_running_loop(None)
+            elif activity == kCFRunLoopExit:
+                self._running = False
+                asyncio._set_running_loop(None)
 
-        elif activity == kCFRunLoopBeforeTimers:
-            timer_count = len(self._timer_q)
-            if (
-                timer_count > _MIN_SCHEDULED_TIMER_HANDLES
-                and self._timer_cancelled_count / timer_count
-                > _MIN_CANCELLED_TIMER_HANDLES_FRACTION
-            ):
-                # Remove delayed calls that were cancelled if their number
-                # is too high
-                new_timer_q = []
-                for handle in self._timer_q:
-                    if handle._cancelled:
-                        handle._scheduled = False
-                    else:
-                        new_timer_q.append(handle)
+            elif activity == kCFRunLoopBeforeTimers:
+                timer_count = len(self._timer_q)
+                if (
+                    timer_count > _MIN_SCHEDULED_TIMER_HANDLES
+                    and self._timer_cancelled_count / timer_count
+                    > _MIN_CANCELLED_TIMER_HANDLES_FRACTION
+                ):
+                    # Remove delayed calls that were cancelled if their number
+                    # is too high
+                    new_timer_q = []
+                    for handle in self._timer_q:
+                        if handle._cancelled:
+                            handle._scheduled = False
+                        else:
+                            new_timer_q.append(handle)
 
-                heapq.heapify(new_timer_q)
-                self._new_timer_q = new_timer_q
-                self._timer_cancelled_count = 0
-            else:
-                # Remove delayed calls that were cancelled from head of queue.
-                while self._timer_q and self._timer_q[0]._cancelled:
-                    self._timer_cancelled_count -= 1
-                    handle = heapq.heappop(self._timer_q)
-                    handle._scheduled = False
-
-            # This is the only place where callbacks are actually *called*.
-            # All other places just add them to ready.
-            # Note: We run all currently scheduled callbacks, but not any
-            # callbacks scheduled by callbacks run this time around --
-            # they will be run the next time (after another I/O poll).
-            # Use an idiom that is thread-safe without using locks.
-            ntodo = len(self._ready)
-            for _ in range(ntodo):
-                handle = self._ready.popleft()
-                if handle._cancelled:
-                    continue
-                if self._debug:
-                    try:
-                        self._current_handle = handle
-                        t0 = self.time()
-                        handle._run()
-                        dt = self.time() - t0
-                        if dt >= self.slow_callback_duration:
-                            logger.warning(
-                                "Executing %s took %.3f seconds",
-                                _format_handle(handle),
-                                dt,
-                            )
-                    finally:
-                        self._current_handle = None
+                    heapq.heapify(new_timer_q)
+                    self._new_timer_q = new_timer_q
+                    self._timer_cancelled_count = 0
                 else:
-                    handle._run()
-            handle = None  # Needed to break cycles when an exception occurs.
+                    # Remove delayed calls that were cancelled from head of queue.
+                    while self._timer_q and self._timer_q[0]._cancelled:
+                        self._timer_cancelled_count -= 1
+                        handle = heapq.heappop(self._timer_q)
+                        handle._scheduled = False
+
+                # This is the only place where callbacks are actually *called*.
+                # All other places just add them to ready.
+                # Note: We run all currently scheduled callbacks, but not any
+                # callbacks scheduled by callbacks run this time around --
+                # they will be run the next time (after another I/O poll).
+                # Use an idiom that is thread-safe without using locks.
+                ntodo = len(self._ready)
+                for _ in range(ntodo):
+                    handle = self._ready.popleft()
+                    if handle._cancelled:
+                        continue
+                    if self._debug:
+                        try:
+                            self._current_handle = handle
+                            t0 = self.time()
+                            handle._run()
+                            dt = self.time() - t0
+                            if dt >= self.slow_callback_duration:
+                                logger.warning(
+                                    "Executing %s took %.3f seconds",
+                                    _format_handle(handle),
+                                    dt,
+                                )
+                        finally:
+                            self._current_handle = None
+                    else:
+                        handle._run()
+                handle = None  # Needed to break cycles when an exception occurs.
+
+        except (KeyboardInterrupt, SystemExit) as exc:
+            # XXX: Maybe arrange for exception to be raised later...
+            CFRunLoopStop(self._loop)
+            self._exception = exc
+
+        except:  # noqa: E722, B001
+            logger.info(f"Unexpected exception", exc_info=True)
 
     def _add_callback(self, handle):
         """Add a Handle to _scheduled (TimerHandle) or _ready."""
@@ -292,6 +303,11 @@ class PyObjCEventLoop(
             CFRunLoopRun()
         finally:
             sys.set_asyncgen_hooks(*old_agen_hooks)
+
+        if self._exception is not None:
+            exc = self._exception
+            self._exception = None
+            raise exc
 
     def stop(self):
         CFRunLoopStop(self._loop)
@@ -437,10 +453,44 @@ class PyObjCEventLoop(
     # Working with pipes
 
     async def connect_read_pipe(self, protocol_factory, pipe):
-        raise NotImplementedError(22)
+        protocol = protocol_factory()
+        waiter = self.create_future()
+        transport = self._make_read_pipe_transport(pipe, protocol, waiter)
+
+        try:
+            await waiter
+        except:  # noqa: E722, B001
+            transport.close()
+            raise
+
+        if self._debug:
+            logger.debug(
+                "Read pipe %r connected: (%r, %r)", pipe.fileno(), transport, protocol
+            )
+        return transport, protocol
 
     async def connect_write_pipe(self, protocol_factory, pipe):
-        raise NotImplementedError(23)
+        protocol = protocol_factory()
+        waiter = self.create_future()
+        transport = self._make_write_pipe_transport(pipe, protocol, waiter)
+
+        try:
+            await waiter
+        except:  # noqa: E722, B001
+            transport.close()
+            raise
+
+        if self._debug:
+            logger.debug(
+                "Write pipe %r connected: (%r, %r)", pipe.fileno(), transport, protocol
+            )
+        return transport, protocol
+
+    def _make_read_pipe_transport(self, pipe, protocol, waiter=None, extra=None):
+        return _UnixReadPipeTransport(self, pipe, protocol, waiter, extra)
+
+    def _make_write_pipe_transport(self, pipe, protocol, waiter=None, extra=None):
+        return _UnixWritePipeTransport(self, pipe, protocol, waiter, extra)
 
     # Executing code in thread or process pools
 
