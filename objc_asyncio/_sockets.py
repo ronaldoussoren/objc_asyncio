@@ -28,14 +28,11 @@ from Cocoa import (
     kCFRunLoopCommonModes,
 )
 
+# from ._debug import traceexceptions
 from ._log import logger
 from ._resolver import _interleave_addrinfos, _ipaddr_info
 
 _unset = object()
-
-
-def _set_reuseport(sock):
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
 
 
 def _check_ssl_socket(sock):
@@ -84,7 +81,7 @@ class SocketMixin:
             self._exception = exc
 
         except:  # noqa: E722, B001
-            logger.info(f"Unexpected exception", exc_info=True)
+            logger.info("Unexpected exception", exc_info=True)
 
     def _process_events(self, event_list):
         for key, mask in event_list:
@@ -390,7 +387,7 @@ class SocketMixin:
 
         try:
             await waiter
-        except:  # noqa: F722, B001
+        except:  # noqa: E722, B001
             transport.close()
             raise
 
@@ -573,7 +570,7 @@ class SocketMixin:
                 if family == 0:
                     raise ValueError("unexpected address family")
                 addr_pairs_info = (((family, proto), (None, None)),)
-            elif hasattr(socket, "AF_UNIX") and family == socket.AF_UNIX:
+            elif family == socket.AF_UNIX:
                 for addr in (local_addr, remote_addr):
                     if addr is not None and not isinstance(addr, str):
                         raise TypeError("string is expected")
@@ -659,7 +656,7 @@ class SocketMixin:
                         family=family, type=socket.SOCK_DGRAM, proto=proto
                     )
                     if reuse_port:
-                        _set_reuseport(sock)
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
                     if allow_broadcast:
                         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
                     sock.setblocking(False)
@@ -674,7 +671,7 @@ class SocketMixin:
                     if sock is not None:
                         sock.close()
                     exceptions.append(exc)
-                except:  # noqa: F722, B001
+                except:  # noqa: E722, B001
                     if sock is not None:
                         sock.close()
                     raise
@@ -706,7 +703,7 @@ class SocketMixin:
 
         try:
             await waiter
-        except:  # noqa: F722, B001
+        except:  # noqa: E722, B001
             transport.close()
             raise
 
@@ -823,7 +820,7 @@ class SocketMixin:
                     if reuse_address:
                         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
                     if reuse_port:
-                        _set_reuseport(sock)
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
                     # Disable IPv4/IPv6 dual stack support (enabled by
                     # default on Linux) which makes a single socket
                     # listen on both address families.
@@ -1094,6 +1091,7 @@ class SocketMixin:
         else:
             fut.set_result(nbytes)
 
+    # @traceexceptions
     async def sock_sendall(self, sock, data):
         """Send data to the socket.
 
@@ -1122,6 +1120,7 @@ class SocketMixin:
         self.add_writer(fd, self._sock_sendall, fut, sock, memoryview(data), [n])
         return await fut
 
+    # @traceexceptions
     def _sock_sendall(self, fut, sock, view, pos):
         if fut.done():
             # Future cancellation can be scheduled on previous loop iteration
@@ -1153,7 +1152,7 @@ class SocketMixin:
         if self._debug and sock.gettimeout() != 0:
             raise ValueError("the socket must be non-blocking")
 
-        if not hasattr(socket, "AF_UNIX") or sock.family != socket.AF_UNIX:
+        if sock.family != socket.AF_UNIX:
             resolved = await self._ensure_resolved(
                 address, family=sock.family, proto=sock.proto
             )
@@ -1222,7 +1221,7 @@ class SocketMixin:
         fd = sock.fileno()
         if registered:
             self.remove_reader(fd)
-        if fut.done():
+        if fut.done():  # Primarily happens when a task is cancellede
             return
         try:
             conn, address = sock.accept()

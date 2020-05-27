@@ -230,12 +230,11 @@ class PyObjCEventLoop(
                 handle = None  # Needed to break cycles when an exception occurs.
 
         except (KeyboardInterrupt, SystemExit) as exc:
-            # XXX: Maybe arrange for exception to be raised later...
             CFRunLoopStop(self._loop)
             self._exception = exc
 
         except:  # noqa: E722, B001
-            logger.info(f"Unexpected exception", exc_info=True)
+            logger.info("Unexpected exception", exc_info=True)
 
     def _add_callback(self, handle):
         """Add a Handle to _scheduled (TimerHandle) or _ready."""
@@ -261,7 +260,7 @@ class PyObjCEventLoop(
 
         try:
             self.run_forever()
-        except:  # noqa: B001
+        except:  # noqa: E722, B001
             if new_task and future.done() and not future.cancelled():
                 # The coroutine raised a BaseException. Consume the exception
                 # to not log a warning, the caller doesn't have access to the
