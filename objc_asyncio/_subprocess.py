@@ -149,6 +149,9 @@ class KQueueChildWatcher(asyncio.AbstractChildWatcher):
     This watcher uses kqueue to monitor (child) processes.  This watcher
     does not require signals or threads and does not interact with
     other process management APIs.
+
+    It is save to have multiple instances of this watcher, and those can
+    be attached to different loops.
     """
 
     def __init__(self) -> None:
@@ -167,6 +170,9 @@ class KQueueChildWatcher(asyncio.AbstractChildWatcher):
     def is_active(self) -> bool:
         return self._loop is not None and self._loop.is_running()
 
+    def close(self):
+        self.attach_loop(None)
+
     def attach_loop(self, loop: asyncio.AbstractEventLoop):
         if self._loop is not None and loop is None and self._callbacks:
             warnings.warn(
@@ -179,12 +185,12 @@ class KQueueChildWatcher(asyncio.AbstractChildWatcher):
             self._kqueue.control(
                 [
                     select.kevent(
-                        pid,
-                        select.KQ_EV_ENABLE,
-                        select.KQ_EV_DISABLE,
-                        select.KQ_NOTE_EXIT,
-                        0,
-                        0,
+                        ident=pid,
+                        filter=select.KQ_FILTER_PROC,
+                        flags=select.KQ_EV_DELETE,
+                        fflags=select.KQ_NOTE_EXIT,
+                        data=0,
+                        udata=0,
                     )
                     for pid in self._callbacks
                 ],
@@ -192,7 +198,7 @@ class KQueueChildWatcher(asyncio.AbstractChildWatcher):
                 0,
             )
 
-            self._callbacks._clear()
+            self._callbacks.clear()
 
         if self._loop is not None:
             self._loop.remove_reader(self._kqueue.fileno())
@@ -207,13 +213,13 @@ class KQueueChildWatcher(asyncio.AbstractChildWatcher):
     ):
         self._kqueue.control(
             [
-                select.kqueue(
-                    pid,
-                    select.KQ_FILTER_PROC,
-                    select.KQ_EV_ENABLE,
-                    select.KQ_NOTE_EXIT,
-                    0,
-                    0,
+                select.kevent(
+                    ident=pid,
+                    filter=select.KQ_FILTER_PROC,
+                    flags=select.KQ_EV_ADD,
+                    fflags=select.KQ_NOTE_EXIT,
+                    data=0,
+                    udata=0,
                 )
             ],
             0,
@@ -238,27 +244,31 @@ class KQueueChildWatcher(asyncio.AbstractChildWatcher):
         else:
             returncode = _compute_returncode(status)
 
-        self._kqueue.control(
-            [
-                select.kqueue(
-                    pid,
-                    select.KQ_FILTER_PROC,
-                    select.KQ_EV_DISABLE,
-                    select.KQ_NOTE_EXIT,
-                    0,
-                    0,
-                )
-            ],
-            0,
-            0,
-        )
+        try:
+            self._kqueue.control(
+                [
+                    select.kevent(
+                        ident=pid,
+                        filter=select.KQ_FILTER_PROC,
+                        flags=select.KQ_EV_DELETE,
+                        fflags=select.KQ_NOTE_EXIT,
+                        data=0,
+                        udata=0,
+                    )
+                ],
+                0,
+                0,
+            )
+        except FileNotFoundError:
+            # Not sure why this happens
+            pass
+
         callback(pid, returncode, *args)
 
     def _handle_process_events(self) -> None:
         events = self._kqueue.control(None, len(self._callbacks), 0)
-        for event in events:
-            print(event)
-            self._do_wait(events.ident)
+        for evt in events:
+            self._do_wait(evt.ident)
 
     def remove_child_handler(self, pid: int) -> None:
         try:
@@ -268,13 +278,13 @@ class KQueueChildWatcher(asyncio.AbstractChildWatcher):
 
         self._kqueue.control(
             [
-                select.kqueue(
-                    pid,
-                    select.KQ_FILTER_PROC,
-                    select.KQ_EV_DISABLE,
-                    select.KQ_NOTE_EXIT,
-                    0,
-                    0,
+                select.kevent(
+                    ident=pid,
+                    filter=select.KQ_FILTER_PROC,
+                    flags=select.KQ_EV_DELETE,
+                    fflags=select.KQ_NOTE_EXIT,
+                    data=0,
+                    udata=0,
                 )
             ],
             0,
