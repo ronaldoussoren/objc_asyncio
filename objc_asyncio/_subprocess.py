@@ -1,5 +1,9 @@
 import asyncio
+import os
+import select
 import subprocess
+import typing
+import warnings
 from asyncio.unix_events import _UnixSubprocessTransport
 
 from ._log import logger
@@ -137,3 +141,157 @@ class SubprocessMixin:
 
     def _child_watcher_callback(self, pid, returncode, transp):
         self.call_soon_threadsafe(transp._process_exited, returncode)
+
+
+class KQueueChildWatcher(asyncio.AbstractChildWatcher):
+    """Monitor child processes
+
+    This watcher uses kqueue to monitor (child) processes.  This watcher
+    does not require signals or threads and does not interact with
+    other process management APIs.
+    """
+
+    def __init__(self) -> None:
+        self._loop = None
+        self._kqueue = select.kqueue()
+        self._callbacks = {}
+
+    def __enter__(self) -> "KQueueChildWatcher":
+        return self
+
+    def __exit(
+        self, exc_type: typing.Any, exc_value: typing.Any, exc_traceback: typing.Any
+    ) -> None:
+        pass
+
+    def is_active(self) -> bool:
+        return self._loop is not None and self._loop.is_running()
+
+    def attach_loop(self, loop: asyncio.AbstractEventLoop):
+        if self._loop is not None and loop is None and self._callbacks:
+            warnings.warn(
+                "A loop is being detached "
+                "from a child watcher with pending handlers",
+                RuntimeWarning,
+            )
+
+        if self._callbacks:
+            self._kqueue.control(
+                [
+                    select.kevent(
+                        pid,
+                        select.KQ_EV_ENABLE,
+                        select.KQ_EV_DISABLE,
+                        select.KQ_NOTE_EXIT,
+                        0,
+                        0,
+                    )
+                    for pid in self._callbacks
+                ],
+                0,
+                0,
+            )
+
+            self._callbacks._clear()
+
+        if self._loop is not None:
+            self._loop.remove_reader(self._kqueue.fileno())
+
+        self._loop = loop
+
+        if self._loop is not None:
+            self._loop.add_reader(self._kqueue.fileno(), self._handle_process_events)
+
+    def add_child_handler(
+        self, pid: int, callback: typing.Callable[..., None], *args: typing.Any
+    ):
+        self._kqueue.control(
+            [
+                select.kqueue(
+                    pid,
+                    select.KQ_FILTER_PROC,
+                    select.KQ_EV_ENABLE,
+                    select.KQ_NOTE_EXIT,
+                    0,
+                    0,
+                )
+            ],
+            0,
+            0,
+        )
+
+        self._callbacks[pid] = (callback, args)
+
+    def _do_wait(self, pid: int) -> None:
+        callback, args = self._callbacks.pop(pid)
+        try:
+            _, status = os.waitpid(pid, 0)
+        except ChildProcessError:
+            # The child process is already reaped
+            # (may happen if waitpid() is called elsewhere).
+            returncode = 255
+            logger.warning(
+                "child process pid %d exit status already read: "
+                " will report returncode 255",
+                pid,
+            )
+        else:
+            returncode = _compute_returncode(status)
+
+        self._kqueue.control(
+            [
+                select.kqueue(
+                    pid,
+                    select.KQ_FILTER_PROC,
+                    select.KQ_EV_DISABLE,
+                    select.KQ_NOTE_EXIT,
+                    0,
+                    0,
+                )
+            ],
+            0,
+            0,
+        )
+        callback(pid, returncode, *args)
+
+    def _handle_process_events(self) -> None:
+        events = self._kqueue.control(None, len(self._callbacks), 0)
+        for event in events:
+            print(event)
+            self._do_wait(events.ident)
+
+    def remove_child_handler(self, pid: int) -> None:
+        try:
+            del self._callbacks[pid]
+        except KeyError:
+            return False
+
+        self._kqueue.control(
+            [
+                select.kqueue(
+                    pid,
+                    select.KQ_FILTER_PROC,
+                    select.KQ_EV_DISABLE,
+                    select.KQ_NOTE_EXIT,
+                    0,
+                    0,
+                )
+            ],
+            0,
+            0,
+        )
+        return True
+
+
+def _compute_returncode(status):
+    if os.WIFSIGNALED(status):
+        # The child process died because of a signal.
+        return -os.WTERMSIG(status)
+    elif os.WIFEXITED(status):
+        # The child process exited (e.g sys.exit()).
+        return os.WEXITSTATUS(status)
+    else:
+        # The child exited, but we don't understand its status.
+        # This shouldn't happen, but if it does, let's just
+        # return that status; perhaps that helps debug it.
+        return status
