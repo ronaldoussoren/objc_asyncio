@@ -4,7 +4,7 @@ import traceback
 
 
 def traceexceptions(function):
-    if asyncio.iscoroutine(function):
+    if asyncio.iscoroutinefunction(function):
 
         @functools.wraps(function)
         async def wrapper(*args, **kwds):
