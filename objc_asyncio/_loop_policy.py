@@ -3,11 +3,14 @@ import threading
 import typing
 
 from ._loop import PyObjCEventLoop
+from ._subprocess import KQueueChildWatcher
+
+_lock = threading.Lock()
 
 
 class PyObjCEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
     class _Local(threading.local):
-        _loop = None
+        _loop: typing.Optional[asyncio.AbstractEventLoop] = None
         _set_called = False
 
     def __init__(self):
@@ -60,11 +63,11 @@ class PyObjCEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
         return PyObjCEventLoop()
 
     def _init_watcher(self) -> None:
-        # with asyncio._lock: # XXX
-        if self._watcher is None:  # pragma: no branch
-            self._watcher = asyncio.ThreadedChildWatcher()
-            if threading.current_thread() is threading.main_thread():
-                self._watcher.attach_loop(self._local._loop)
+        with _lock:
+            if self._watcher is None:  # pragma: no branch
+                self._watcher = KQueueChildWatcher()
+                if threading.current_thread() is threading.main_thread():
+                    self._watcher.attach_loop(self._local._loop)
 
     def get_child_watcher(self) -> asyncio.AbstractChildWatcher:
         """Get the watcher for child processes.
