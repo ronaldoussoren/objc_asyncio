@@ -155,9 +155,11 @@ class KQueueChildWatcher(asyncio.AbstractChildWatcher):
     """
 
     def __init__(self) -> None:
-        self._loop = None
+        self._loop: typing.Optional[asyncio.AbstractEventLoop] = None
         self._kqueue = select.kqueue()
-        self._callbacks = {}
+        self._callbacks: typing.Dict[
+            int, typing.Tuple[typing.Callable[..., None], typing.Tuple[typing.Any, ...]]
+        ] = {}
 
     def __enter__(self) -> "KQueueChildWatcher":
         return self
@@ -173,7 +175,7 @@ class KQueueChildWatcher(asyncio.AbstractChildWatcher):
     def close(self):
         self.attach_loop(None)
 
-    def attach_loop(self, loop: asyncio.AbstractEventLoop):
+    def attach_loop(self, loop: typing.Optional[asyncio.AbstractEventLoop]):
         if self._loop is not None and loop is None and self._callbacks:
             warnings.warn(
                 "A loop is being detached "
@@ -270,7 +272,7 @@ class KQueueChildWatcher(asyncio.AbstractChildWatcher):
         for evt in events:
             self._do_wait(evt.ident)
 
-    def remove_child_handler(self, pid: int) -> None:
+    def remove_child_handler(self, pid: int) -> bool:
         try:
             del self._callbacks[pid]
         except KeyError:
