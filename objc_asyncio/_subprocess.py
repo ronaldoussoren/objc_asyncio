@@ -1,12 +1,15 @@
 import asyncio
 import os
 import select
+import socket
 import subprocess
 import typing
 import warnings
-from asyncio.unix_events import _UnixSubprocessTransport
+from asyncio.base_subprocess import BaseSubprocessTransport
 
 from ._log import logger
+
+_ProtocolFactory = typing.Callable[[], asyncio.BaseProtocol]
 
 
 def _format_pipe(fd):
@@ -14,12 +17,16 @@ def _format_pipe(fd):
         return "<pipe>"
     elif fd == subprocess.STDOUT:
         return "<stdout>"
+    elif fd == subprocess.DEVNULL:
+        return "<devnull>"
     else:
         return repr(fd)
 
 
-class SubprocessMixin:
-    def _log_subprocess(self, msg, stdin, stdout, stderr):
+class SubprocessMixin(asyncio.AbstractEventLoop):
+    def _log_subprocess(
+        self, msg: str, stdin: typing.Any, stdout: typing.Any, stderr: typing.Any
+    ) -> None:
         info = [msg]
         if stdin is not None:
             info.append(f"stdin={_format_pipe(stdin)}")
@@ -34,44 +41,35 @@ class SubprocessMixin:
 
     async def subprocess_shell(
         self,
-        protocol_factory,
-        cmd,
+        protocol_factory: _ProtocolFactory,
+        cmd: typing.Union[bytes, str],
         *,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=False,
-        shell=True,
-        bufsize=0,
-        encoding=None,
-        errors=None,
-        text=None,
+        stdin: typing.Any = subprocess.PIPE,
+        stdout: typing.Any = subprocess.PIPE,
+        stderr: typing.Any = subprocess.PIPE,
         **kwargs,
-    ):
+    ) -> typing.Tuple[asyncio.BaseTransport, asyncio.BaseProtocol]:
+
         if not isinstance(cmd, (bytes, str)):
             raise ValueError("cmd must be a string")
-        if universal_newlines:
-            raise ValueError("universal_newlines must be False")
-        if not shell:
-            raise ValueError("shell must be True")
-        if bufsize != 0:
-            raise ValueError("bufsize must be 0")
-        if text:
-            raise ValueError("text must be False")
-        if encoding is not None:
-            raise ValueError("encoding must be None")
-        if errors is not None:
-            raise ValueError("errors must be None")
+        for key in (
+            "bufsize",
+            "universal_newlines",
+            "shell",
+            "text",
+            "encoding",
+            "errors",
+        ):
+            if key in kwargs:
+                raise ValueError(f"{key} should not be specified")
 
         protocol = protocol_factory()
         debug_log = None
         if self._debug:
-            # don't log parameters: they may contain sensitive information
-            # (password) and may be too long
-            debug_log = "run shell command %r" % cmd
+            debug_log = f"run shell command {cmd!r}"
             self._log_subprocess(debug_log, stdin, stdout, stderr)
         transport = await self._make_subprocess_transport(
-            protocol, cmd, True, stdin, stdout, stderr, bufsize, **kwargs
+            protocol, cmd, True, stdin, stdout, stderr, **kwargs
         )
         if self._debug and debug_log is not None:
             logger.info("%s: %r", debug_log, transport)
@@ -80,26 +78,47 @@ class SubprocessMixin:
     async def subprocess_exec(
         self,
         protocol_factory,
+        program,
         *args,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         **kwargs,
     ):
-        raise NotImplementedError
+        if not isinstance(program, (bytes, str)):
+            raise ValueError("program must be a string")
+        if not all(isinstance(x, type(program)) for x in args):
+            raise ValueError("program arguments must be same type as program")
+        for key in (
+            "bufsize",
+            "universal_newlines",
+            "shell",
+            "text",
+            "encoding",
+            "errors",
+        ):
+            if key in kwargs:
+                raise ValueError(f"{key} should not be specified")
+
+        popen_args = (program,) + args
+        protocol = protocol_factory()
+        debug_log = None
+        if self._debug:
+            # don't log parameters: they may contain sensitive information
+            # (password) and may be too long
+            debug_log = f"run shell command {program!r}"
+            self._log_subprocess(debug_log, stdin, stdout, stderr)
+        transport = await self._make_subprocess_transport(
+            protocol, popen_args, False, stdin, stdout, stderr, **kwargs
+        )
+        if self._debug and debug_log is not None:
+            logger.info("%s: %r", debug_log, transport)
+        return transport, protocol
 
     async def _make_subprocess_transport(
-        self,
-        protocol,
-        args,
-        shell,
-        stdin,
-        stdout,
-        stderr,
-        bufsize,
-        extra=None,
-        **kwargs,
+        self, protocol, args, shell, stdin, stdout, stderr, extra=None, **kwargs
     ):
+        assert extra is None
         with asyncio.get_child_watcher() as watcher:
             if not watcher.is_active():
                 # Check early.
@@ -111,7 +130,7 @@ class SubprocessMixin:
                     "subprocess support is not installed."
                 )
             waiter = self.create_future()
-            transp = _UnixSubprocessTransport(
+            transp = PyObjCSubprocessTransport(
                 self,
                 protocol,
                 args,
@@ -119,7 +138,7 @@ class SubprocessMixin:
                 stdin,
                 stdout,
                 stderr,
-                bufsize,
+                0,
                 waiter=waiter,
                 extra=extra,
                 **kwargs,
@@ -164,7 +183,7 @@ class KQueueChildWatcher(asyncio.AbstractChildWatcher):
     def __enter__(self) -> "KQueueChildWatcher":
         return self
 
-    def __exit(
+    def __exit__(
         self, exc_type: typing.Any, exc_value: typing.Any, exc_traceback: typing.Any
     ) -> None:
         pass
@@ -183,7 +202,6 @@ class KQueueChildWatcher(asyncio.AbstractChildWatcher):
                 RuntimeWarning,
             )
 
-        if self._callbacks:
             self._kqueue.control(
                 [
                     select.kevent(
@@ -213,22 +231,30 @@ class KQueueChildWatcher(asyncio.AbstractChildWatcher):
     def add_child_handler(
         self, pid: int, callback: typing.Callable[..., None], *args: typing.Any
     ):
-        self._kqueue.control(
-            [
-                select.kevent(
-                    ident=pid,
-                    filter=select.KQ_FILTER_PROC,
-                    flags=select.KQ_EV_ADD,
-                    fflags=select.KQ_NOTE_EXIT,
-                    data=0,
-                    udata=0,
-                )
-            ],
-            0,
-            0,
-        )
+        try:
+            self._kqueue.control(
+                [
+                    select.kevent(
+                        ident=pid,
+                        filter=select.KQ_FILTER_PROC,
+                        flags=select.KQ_EV_ADD,
+                        fflags=select.KQ_NOTE_EXIT,
+                        data=0,
+                        udata=0,
+                    )
+                ],
+                0,
+                0,
+            )
+            self._callbacks[pid] = (callback, args)
 
-        self._callbacks[pid] = (callback, args)
+        except ProcessLookupError:
+            # The process filter cannot be added when the
+            # process exitted before we got here. This can
+            # happen when the child proces exits quickly and
+            # we do some work (such as logging).
+            self._callbacks[pid] = (callback, args)
+            self._do_wait(pid)
 
     def _do_wait(self, pid: int) -> None:
         callback, args = self._callbacks.pop(pid)
@@ -295,7 +321,7 @@ class KQueueChildWatcher(asyncio.AbstractChildWatcher):
         return True
 
 
-def _compute_returncode(status):
+def _compute_returncode(status: int):
     if os.WIFSIGNALED(status):
         # The child process died because of a signal.
         return -os.WTERMSIG(status)
@@ -307,3 +333,39 @@ def _compute_returncode(status):
         # This shouldn't happen, but if it does, let's just
         # return that status; perhaps that helps debug it.
         return status
+
+
+class PyObjCSubprocessTransport(BaseSubprocessTransport):
+    def _start(
+        self,
+        args: typing.Tuple[typing.Any],
+        shell: bool,
+        stdin: typing.Any,
+        stdout: typing.Any,
+        stderr: typing.Any,
+        bufsize: int,
+        **kwargs,
+    ) -> None:
+        stdin_w = None
+        if stdin == asyncio.subprocess.PIPE:
+            stdin, stdin_w = socket.socketpair()
+
+        try:
+            self._proc = subprocess.Popen(
+                args,
+                shell=shell,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+                universal_newlines=False,
+                bufsize=bufsize,
+                **kwargs,
+            )
+            if stdin_w is not None:
+                stdin.close()
+                self._proc.stdin = open(stdin_w.detach(), "wb", buffering=bufsize)
+                stdin_w = None
+        finally:
+            if stdin_w is not None:
+                stdin.close()
+                stdin_w.close()

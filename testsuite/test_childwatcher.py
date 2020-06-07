@@ -140,10 +140,13 @@ class TestChildWatcher(utils.TestCase):
         async def main():
             await asyncio.sleep(0.5)
 
-        self.loop.run_until_complete(main())
+        with utils.captured_log() as stream:
+            self.loop.run_until_complete(main())
 
         self.assertEqual(watch_results, {(p1.pid, 255, ())})
         self.assertNotIn(p1.pid, watcher._callbacks)
+
+        self.assertIn("exit status already read", stream.getvalue())
 
     def test_decoding_status(self):
         with self.subTest("exit"):
@@ -170,3 +173,78 @@ class TestChildWatcher(utils.TestCase):
             os.kill(p.pid, signal.SIGTERM)
             _, status = os.waitpid(p.pid, 0)
             self.assertEqual(_compute_returncode(status), -signal.SIGTERM)
+
+    def test_attach_with_work(self):
+        watcher = objc_asyncio.KQueueChildWatcher()
+        watcher.attach_loop(self.loop)
+        self.addCleanup(watcher.close)
+
+        watch_results = set()
+
+        def watch(pid, result):
+            watch_results.add((pid, result))
+
+        p1 = subprocess.Popen(["/usr/bin/true"], stdout=subprocess.DEVNULL)
+        self.addCleanup(p1.wait)
+        watcher.add_child_handler(p1.pid, watch)
+
+        p2 = subprocess.Popen(["/usr/bin/true"], stdout=subprocess.DEVNULL)
+        self.addCleanup(p2.wait)
+        watcher.add_child_handler(p2.pid, watch)
+
+        self.assertIn(p1.pid, watcher._callbacks)
+        self.assertIn(p2.pid, watcher._callbacks)
+
+        self.assertIs(watcher._loop, self.loop)
+
+        loop2 = objc_asyncio.PyObjCEventLoop()
+        self.assertIs(watcher._loop, self.loop)
+
+        watcher.attach_loop(loop2)
+        self.assertIs(watcher._loop, loop2)
+
+        self.assertIn(p1.pid, watcher._callbacks)
+        self.assertIn(p2.pid, watcher._callbacks)
+
+        async def main():
+            await asyncio.sleep(0.5)
+
+        loop2.run_until_complete(main())
+
+        self.assertNotIn(p1.pid, watcher._callbacks)
+        self.assertNotIn(p2.pid, watcher._callbacks)
+
+        self.assertEqual(watch_results, {(p1.pid, 0), (p2.pid, 0)})
+
+    def test_detach_with_work(self):
+        watcher = objc_asyncio.KQueueChildWatcher()
+        watcher.attach_loop(self.loop)
+        self.addCleanup(watcher.close)
+
+        watch_results = set()
+
+        def watch(pid, result):
+            watch_results.add((pid, result))
+
+        p1 = subprocess.Popen(["/bin/ls"], stdout=subprocess.DEVNULL)
+        self.addCleanup(p1.wait)
+        watcher.add_child_handler(p1.pid, watch)
+
+        p2 = subprocess.Popen(["/bin/ls"], stdout=subprocess.DEVNULL)
+        self.addCleanup(p2.wait)
+        watcher.add_child_handler(p2.pid, watch)
+
+        self.assertIn(p1.pid, watcher._callbacks)
+        self.assertIn(p2.pid, watcher._callbacks)
+
+        self.assertIs(watcher._loop, self.loop)
+
+        with self.assertWarnsRegex(
+            RuntimeWarning, "child watcher with pending handlers"
+        ):
+            watcher.attach_loop(None)
+
+        self.assertIs(watcher._loop, None)
+
+        self.assertNotIn(p1.pid, watcher._callbacks)
+        self.assertNotIn(p2.pid, watcher._callbacks)
