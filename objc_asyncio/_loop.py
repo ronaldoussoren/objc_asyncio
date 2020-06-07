@@ -342,6 +342,7 @@ class PyObjCEventLoop(
 
         self._closed = True
 
+        SignalMixin.close(self)
         ExecutorMixin.close(self)
         SocketMixin.close(self)
 
