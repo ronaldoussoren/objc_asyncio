@@ -1,6 +1,7 @@
 __all__ = ("IBAction",)
 
 import asyncio
+import contextlib
 import functools
 import typing
 
@@ -45,3 +46,10 @@ def applicationShouldTerminateWrapper(
         return 1  # XXX
 
     return applicationShouldTerminate_
+
+
+@contextlib.contextmanager
+def running_loop(self):
+    # Note sure yet if this is good enough.
+    asyncio.get_event_loop()
+    yield
