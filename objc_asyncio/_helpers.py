@@ -27,7 +27,7 @@ def IBAction(
 
         @functools.wraps(method)
         def wrapper_(self, arg):
-            asyncio.create_task(method(arg))
+            asyncio.create_task(method(self, arg))
 
         return wrapper_
 
@@ -35,20 +35,20 @@ def IBAction(
         return method
 
 
-def applicationShouldTerminateWrapper(
-    method: typing.Callable[[typing.Any], typing.Awaitable[int]]
-) -> typing.Callable[[typing.Any], int]:
-    # XXX: Add API to pyobjc-core that will make it possible
-    # to automate the application of this decorator...
-    @functools.wraps(method)
-    def applicationShouldTerminate_(self, application):
-        task = asyncio.create_task(method(self, application))
-        task.add_done_callback(
-            lambda: application.replyToApplicationShouldTerminate_(task.result())
-        )
-        return 1  # XXX
-
-    return applicationShouldTerminate_
+# def applicationShouldTerminateWrapper(
+#    method: typing.Callable[[typing.Any], typing.Awaitable[int]]
+# ) -> typing.Callable[[typing.Any], int]:
+#    # XXX: Add API to pyobjc-core that will make it possible
+#    # to automate the application of this decorator...
+#    @functools.wraps(method)
+#    def applicationShouldTerminate_(self, application):
+#        task = asyncio.create_task(method(self, application))
+#        task.add_done_callback(
+#            lambda: application.replyToApplicationShouldTerminate_(task.result())
+#        )
+#        return 1  # XXX
+#
+#    return applicationShouldTerminate_
 
 
 def install():
@@ -56,7 +56,7 @@ def install():
 
 
 @contextlib.contextmanager
-def running_loop(self):
+def running_loop():
     """
     Run the body of the with statement with a
     PyObjCEventLoop that is in running state.
