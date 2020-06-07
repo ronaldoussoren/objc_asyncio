@@ -2,6 +2,7 @@ __all__ = "EventLoop"
 
 import asyncio
 import collections
+import contextlib
 import heapq
 import os
 import sys
@@ -26,8 +27,6 @@ from Cocoa import (
     CFRunLoopWakeUp,
     kCFRunLoopBeforeTimers,
     kCFRunLoopCommonModes,
-    kCFRunLoopEntry,
-    kCFRunLoopExit,
 )
 
 from ._exceptionhandler import ExceptionHandlerMixin
@@ -103,15 +102,8 @@ class PyObjCEventLoop(
     def __init__(self):
         self._loop = CFRunLoopGetCurrent()
 
-        # Add a runloop observer to detect if the loop is active to ensure
-        # the EventLoop is running when the CFRunLoop is active, even if
-        # it is started by other code.
         self._observer = CFRunLoopObserverCreateWithHandler(
-            None,
-            kCFRunLoopEntry | kCFRunLoopExit | kCFRunLoopBeforeTimers,
-            True,
-            0,
-            self._observer_loop,
+            None, kCFRunLoopBeforeTimers, True, 0, self._observer_loop
         )
         CFRunLoopAddObserver(self._loop, self._observer, kCFRunLoopCommonModes)
 
@@ -166,15 +158,8 @@ class PyObjCEventLoop(
 
     def _observer_loop(self, observer, activity):
         try:
-            if activity == kCFRunLoopEntry:
-                self._running = True
-                asyncio._set_running_loop(self)
 
-            elif activity == kCFRunLoopExit:
-                self._running = False
-                asyncio._set_running_loop(None)
-
-            elif activity == kCFRunLoopBeforeTimers:
+            if activity == kCFRunLoopBeforeTimers:
                 timer_count = len(self._timer_q)
                 if (
                     timer_count > _MIN_SCHEDULED_TIMER_HANDLES
@@ -292,21 +277,37 @@ class PyObjCEventLoop(
         if not self.is_closed():
             self.call_soon_threadsafe(self.create_task, agen.aclose())
 
-    def run_forever(self):
+    @contextlib.contextmanager
+    def _running_loop(self):
+        # The setup and teardown code for run_forever
+        # is split off into a contextmanager to be
+        # able to reuse this code in GUI applications
+        # (see the running_loop context manager
+        # in ._helpers.
         old_agen_hooks = sys.get_asyncgen_hooks()
         sys.set_asyncgen_hooks(
             firstiter=self._asyncgen_firstiter_hook,
             finalizer=self._asyncgen_finalizer_hook,
         )
+        self._running = True
+        asyncio._set_running_loop(self)
+
         try:
-            CFRunLoopRun()
+            yield
+
         finally:
+            self._running = False
+            asyncio._set_running_loop(None)
             sys.set_asyncgen_hooks(*old_agen_hooks)
 
         if self._exception is not None:
             exc = self._exception
             self._exception = None
             raise exc
+
+    def run_forever(self):
+        with self._running_loop():
+            CFRunLoopRun()
 
     def stop(self):
         CFRunLoopStop(self._loop)

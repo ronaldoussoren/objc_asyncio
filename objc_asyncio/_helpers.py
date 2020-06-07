@@ -5,6 +5,9 @@ import contextlib
 import functools
 import typing
 
+from ._loop import PyObjCEventLoop
+from ._loop_policy import PyObjCEventLoopPolicy
+
 
 def IBAction(
     method: typing.Union[
@@ -48,8 +51,26 @@ def applicationShouldTerminateWrapper(
     return applicationShouldTerminate_
 
 
+def install():
+    asyncio.set_event_loop_policy(PyObjCEventLoopPolicy())
+
+
 @contextlib.contextmanager
 def running_loop(self):
-    # Note sure yet if this is good enough.
-    asyncio.get_event_loop()
-    yield
+    """
+    Run the body of the with statement with a
+    PyObjCEventLoop that is in running state.
+
+    The primary usecase for this it to integrate
+    into a GUI program::
+
+        with running_loop():
+            NSApplicationMain()
+    """
+    install()
+
+    loop = asyncio.get_event_loop()
+    assert isinstance(loop, PyObjCEventLoop)
+
+    with loop._running_loop():
+        yield
