@@ -1,7 +1,11 @@
 License
 =======
 
-Copyright (c) 2020 Ronald Oussoren
+Copyright (c) 2020 Ronald Oussoren, licensed under the MIT license.
+
+Parts of the code were copied from the stdlib implemenation of asyncio and are licensed under
+the PSF license.
+
 
 MIT License
 ...........
