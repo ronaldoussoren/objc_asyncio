@@ -5,7 +5,7 @@ This code just calls into the stdlib functionality for that
 after setting the objc_asyncio eventloop policy.
 """
 import asyncio
-import asyncio.__main__ as asyncio_main
+import asyncio.__main__ as asyncio_main  # type: ignore
 
 import objc_asyncio
 
