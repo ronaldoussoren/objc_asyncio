@@ -8,7 +8,8 @@ import os
 import sys
 import warnings
 import weakref
-from asyncio.unix_events import _UnixReadPipeTransport, _UnixWritePipeTransport  # XXX
+from asyncio.unix_events import _UnixReadPipeTransport as PyObjCReadPipeTransport
+from asyncio.unix_events import _UnixWritePipeTransport as PyObjCWritePipeTransport
 
 from Cocoa import (
     CFAbsoluteTimeGetCurrent,
@@ -96,7 +97,8 @@ class PyObjCEventLoop(
 
     1) Use the standard asyncio eventloop API
     2) Implicitly run the loop by running the Cocoa
-       eventloop in the default mode.
+       eventloop in the default mode (when using a
+       helper function).
     """
 
     def __init__(self):
@@ -456,7 +458,7 @@ class PyObjCEventLoop(
     async def connect_read_pipe(self, protocol_factory, pipe):
         protocol = protocol_factory()
         waiter = self.create_future()
-        transport = self._make_read_pipe_transport(pipe, protocol, waiter)
+        transport = PyObjCReadPipeTransport(self, pipe, protocol, waiter, None)
 
         try:
             await waiter
@@ -473,7 +475,7 @@ class PyObjCEventLoop(
     async def connect_write_pipe(self, protocol_factory, pipe):
         protocol = protocol_factory()
         waiter = self.create_future()
-        transport = self._make_write_pipe_transport(pipe, protocol, waiter)
+        transport = PyObjCWritePipeTransport(self, pipe, protocol, waiter, None)
 
         try:
             await waiter
@@ -487,21 +489,11 @@ class PyObjCEventLoop(
             )
         return transport, protocol
 
-    def _make_read_pipe_transport(self, pipe, protocol, waiter=None, extra=None):
-        return _UnixReadPipeTransport(self, pipe, protocol, waiter, extra)
-
-    def _make_write_pipe_transport(self, pipe, protocol, waiter=None, extra=None):
-        return _UnixWritePipeTransport(self, pipe, protocol, waiter, extra)
-
     # Executing code in thread or process pools
 
     def _timer_handle_cancelled(self, handle):
-        try:
-            if handle._scheduled:
-                self._timer_cancelled_count += 1
-
-        except Exception as exc:
-            print("Exception", exc)
+        if handle._scheduled:
+            self._timer_cancelled_count += 1
 
     def _check_callback(self, callback, method):
         if asyncio.iscoroutine(callback) or asyncio.iscoroutinefunction(callback):
