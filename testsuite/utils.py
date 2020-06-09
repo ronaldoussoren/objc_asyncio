@@ -68,3 +68,12 @@ class TestCase(unittest.TestCase):
         sd2.setblocking(False)
 
         return sd1, sd2
+
+
+class EchoServerProtocol(asyncio.Protocol):
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def data_received(self, data):
+        self.transport.write(data)
+        self.transport.close()
