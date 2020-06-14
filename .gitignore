@@ -8,8 +8,6 @@ workenv
 .mypy_cache
 .tox
 _build
-.envrc
-.direnv
 
 syntax: glob
 *.so
