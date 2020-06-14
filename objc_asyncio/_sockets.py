@@ -3,7 +3,10 @@
 
 import asyncio
 import collections
+import enum
+import errno
 import functools
+import io
 import itertools
 import os
 import selectors
@@ -12,7 +15,6 @@ import ssl
 import stat
 import warnings
 import weakref
-from asyncio import constants  # XXX
 from asyncio.base_events import Server, _SendfileFallbackProtocol  # XXX
 from asyncio.selector_events import _SelectorSocketTransport
 
@@ -33,6 +35,16 @@ from ._log import logger
 from ._resolver import _interleave_addrinfos, _ipaddr_info
 
 _unset = object()
+
+# Used in sendfile fallback code (which is used when
+# the native API cannot be used).
+SENDFILE_FALLBACK_READBUFFER_SIZE = 1024 * 256
+
+
+class _SendfileMode(enum.Enum):
+    UNSUPPORTED = enum.auto()
+    TRY_NATIVE = enum.auto()
+    FALLBACK = enum.auto()
 
 
 def _check_ssl_socket(sock):
@@ -61,10 +73,8 @@ class SocketMixin:
         CFFileDescriptorInvalidate(self._selector_fd)
         self._selector_source = None
         self._selector_fd = None
-
-        if self._selector is not None:
-            self._selector.close()
-            self._selector = None
+        self._selector.close()
+        self._selector = None
 
     def _selector_callout(self, cffd, callbackTypes, info):
         try:
@@ -76,7 +86,6 @@ class SocketMixin:
                     self._selector_fd, kCFFileDescriptorReadCallBack
                 )
         except (KeyboardInterrupt, SystemExit) as exc:
-            # XXX: Maybe arrange for exception to be raised later...
             CFRunLoopStop(self._loop)
             self._exception = exc
 
@@ -113,13 +122,134 @@ class SocketMixin:
                 raise
         return await self._sock_sendfile_fallback(sock, file, offset, count)
 
+    async def _sock_sendfile_native(self, sock, file, offset, count):
+        try:
+            fileno = file.fileno()
+        except (AttributeError, io.UnsupportedOperation):
+            raise asyncio.SendfileNotAvailableError("not a regular file")
+        try:
+            fsize = os.fstat(fileno).st_size
+        except OSError:
+            raise asyncio.SendfileNotAvailableError("not a regular file")
+        blocksize = count if count else fsize
+        if not blocksize:
+            return 0  # empty file
+
+        fut = self.create_future()
+        self._sock_sendfile_native_impl(
+            fut, None, sock, fileno, offset, count, blocksize, 0
+        )
+        return await fut
+
+    def _sock_sendfile_native_impl(
+        self, fut, registered_fd, sock, fileno, offset, count, blocksize, total_sent
+    ):
+        fd = sock.fileno()
+        if registered_fd is not None:
+            # Remove the callback early.  It should be rare that the
+            # selector says the fd is ready but the call still returns
+            # EAGAIN, and I am willing to take a hit in that case in
+            # order to simplify the common case.
+            self.remove_writer(registered_fd)
+        if fut.cancelled():
+            self._sock_sendfile_update_filepos(fileno, offset, total_sent)
+            return
+        if count:
+            blocksize = count - total_sent
+            if blocksize <= 0:
+                self._sock_sendfile_update_filepos(fileno, offset, total_sent)
+                fut.set_result(total_sent)
+                return
+
+        try:
+            sent = os.sendfile(fd, fileno, offset, blocksize)
+        except (BlockingIOError, InterruptedError):
+            if registered_fd is None:
+                self._sock_add_cancellation_callback(fut, sock)
+            self.add_writer(
+                fd,
+                self._sock_sendfile_native_impl,
+                fut,
+                fd,
+                sock,
+                fileno,
+                offset,
+                count,
+                blocksize,
+                total_sent,
+            )
+        except OSError as exc:
+            if (
+                registered_fd is not None
+                and exc.errno == errno.ENOTCONN
+                and type(exc) is not ConnectionError
+            ):
+                # If we have an ENOTCONN and this isn't a first call to
+                # sendfile(), i.e. the connection was closed in the middle
+                # of the operation, normalize the error to ConnectionError
+                # to make it consistent across all Posix systems.
+                new_exc = ConnectionError("socket is not connected", errno.ENOTCONN)
+                new_exc.__cause__ = exc
+                exc = new_exc
+            if total_sent == 0:
+                # We can get here for different reasons, the main
+                # one being 'file' is not a regular mmap(2)-like
+                # file, in which case we'll fall back on using
+                # plain send().
+                err = asyncio.SendfileNotAvailableError("os.sendfile call failed")
+                self._sock_sendfile_update_filepos(fileno, offset, total_sent)
+                fut.set_exception(err)
+            else:
+                self._sock_sendfile_update_filepos(fileno, offset, total_sent)
+                fut.set_exception(exc)
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException as exc:
+            self._sock_sendfile_update_filepos(fileno, offset, total_sent)
+            fut.set_exception(exc)
+        else:
+            if sent == 0:
+                # EOF
+                self._sock_sendfile_update_filepos(fileno, offset, total_sent)
+                fut.set_result(total_sent)
+            else:
+                offset += sent
+                total_sent += sent
+                if registered_fd is None:
+                    self._sock_add_cancellation_callback(fut, sock)
+                self.add_writer(
+                    fd,
+                    self._sock_sendfile_native_impl,
+                    fut,
+                    fd,
+                    sock,
+                    fileno,
+                    offset,
+                    count,
+                    blocksize,
+                    total_sent,
+                )
+
+    def _sock_sendfile_update_filepos(self, fileno, offset, total_sent):
+        if total_sent > 0:
+            os.lseek(fileno, offset, os.SEEK_SET)
+
+    def _sock_add_cancellation_callback(self, fut, sock):
+        def cb(fut):
+            if fut.cancelled():
+                fd = sock.fileno()
+                if fd != -1:
+                    self.remove_writer(fd)
+
+        fut.add_done_callback(cb)
+
     async def _sock_sendfile_fallback(self, sock, file, offset, count):
         if offset:
             file.seek(offset)
         blocksize = (
-            min(count, constants.SENDFILE_FALLBACK_READBUFFER_SIZE)
+            min(count, SENDFILE_FALLBACK_READBUFFER_SIZE)
             if count
-            else constants.SENDFILE_FALLBACK_READBUFFER_SIZE
+            else SENDFILE_FALLBACK_READBUFFER_SIZE
         )
         buf = bytearray(blocksize)
         total_sent = 0
@@ -418,12 +548,10 @@ class SocketMixin:
         """
         if transport.is_closing():
             raise RuntimeError("Transport is closing")
-        mode = getattr(
-            transport, "_sendfile_compatible", constants._SendfileMode.UNSUPPORTED
-        )
-        if mode is constants._SendfileMode.UNSUPPORTED:
+        mode = getattr(transport, "_sendfile_compatible", _SendfileMode.UNSUPPORTED)
+        if mode is _SendfileMode.UNSUPPORTED:
             raise RuntimeError(f"sendfile is not supported for transport {transport!r}")
-        if mode is constants._SendfileMode.TRY_NATIVE:
+        if mode is _SendfileMode.TRY_NATIVE:
             try:
                 return await self._sendfile_native(transport, file, offset, count)
             except asyncio.SendfileNotAvailableError:
@@ -437,6 +565,21 @@ class SocketMixin:
             )
 
         return await self._sendfile_fallback(transport, file, offset, count)
+
+    async def _sendfile_native(self, transp, file, offset, count):
+        del self._transports[transp._sock_fd]
+        resume_reading = transp.is_reading()
+        transp.pause_reading()
+        await transp._make_empty_waiter()
+        try:
+            return await self.sock_sendfile(
+                transp._sock, file, offset, count, fallback=False
+            )
+        finally:
+            transp._reset_empty_waiter()
+            if resume_reading:
+                transp.resume_reading()
+            self._transports[transp._sock_fd] = transp
 
     async def _sendfile_fallback(self, transp, file, offset, count):
         if offset:
@@ -1234,18 +1377,3 @@ class SocketMixin:
             fut.set_exception(exc)
         else:
             fut.set_result((conn, address))
-
-    async def _sendfile_native(self, transp, file, offset, count):
-        del self._transports[transp._sock_fd]
-        resume_reading = transp.is_reading()
-        transp.pause_reading()
-        await transp._make_empty_waiter()
-        try:
-            return await self.sock_sendfile(
-                transp._sock, file, offset, count, fallback=False
-            )
-        finally:
-            transp._reset_empty_waiter()
-            if resume_reading:
-                transp.resume_reading()
-            self._transports[transp._sock_fd] = transp

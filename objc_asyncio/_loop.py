@@ -315,9 +315,6 @@ class PyObjCEventLoop(
         CFRunLoopStop(self._loop)
 
     def is_running(self):
-        # XXX: This should also return true if the Cocoa
-        # runloop is active due to some other reason.
-        #
         return self._running
 
     def _check_closed(self):
