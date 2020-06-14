@@ -11,6 +11,58 @@ from . import utils
 
 
 class TestSocketEvents(utils.TestCase):
+    def test_callout_error(self):
+        class MyException(Exception):
+            pass
+
+        sd1, sd2 = self.make_socketpair()
+
+        def callback(sd):
+            try:
+                sd.send("hello")
+            except Exception:
+                pass
+
+        with utils.captured_log() as stream:
+            with unittest.mock.patch.object(
+                self.loop, "_process_events", side_effect=MyException
+            ):
+
+                async def main():
+                    await asyncio.sleep(0.1)
+
+                self.loop.add_writer(sd1, callback, sd1)
+
+                self.loop.run_until_complete(main())
+
+        self.assertIn("Unexpected exception in selector handling", stream.getvalue())
+
+    def test_callout_systemexit(self):
+        for exception in (SystemExit, KeyboardInterrupt):
+            with self.subTest(exception=exception):
+                sd1, sd2 = self.make_socketpair()
+
+                def callback(sd):
+                    try:
+                        sd.send("hello")
+                    except Exception:
+                        pass
+
+                with unittest.mock.patch.object(
+                    self.loop, "_process_events", side_effect=exception
+                ):
+
+                    async def main():
+                        try:
+                            await asyncio.sleep(0.1)
+                        except Exception:
+                            pass
+
+                    self.loop.add_writer(sd1, callback, sd1)
+
+                    with self.assertRaises(exception):
+                        self.loop.run_until_complete(main())
+
     def test_add_reader(self):
         sd1, sd2 = self.make_socketpair()
         data = []
@@ -1269,7 +1321,7 @@ class TestLowLevelIO(utils.TestCase):
                 n = True
                 return os_sendfile(fd, fileno, offset, blocksize // 2)
 
-            raise OSError("Invalid Argument", errno.EINVAL)
+            raise OSError(errno.EINVAL, "Invalid Argument")
 
         with unittest.mock.patch.object(os, "sendfile", side_effect=side_effect):
             with tempfile.NamedTemporaryFile() as stream:

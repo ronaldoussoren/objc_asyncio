@@ -16,7 +16,7 @@ import stat
 import warnings
 import weakref
 from asyncio.base_events import Server, _SendfileFallbackProtocol  # XXX
-from asyncio.selector_events import _SelectorSocketTransport
+from asyncio.selector_events import _SelectorSocketTransport as PyObjCSocketTransport
 
 from Cocoa import (
     CFFileDescriptorCreate,
@@ -90,7 +90,7 @@ class SocketMixin:
             self._exception = exc
 
         except:  # noqa: E722, B001
-            logger.info("Unexpected exception", exc_info=True)
+            logger.info("Unexpected exception in selector handling", exc_info=True)
 
     def _process_events(self, event_list):
         for key, mask in event_list:
@@ -109,7 +109,7 @@ class SocketMixin:
     def _make_socket_transport(
         self, sock, protocol, waiter=None, *, extra=None, server=None
     ):
-        return _SelectorSocketTransport(self, sock, protocol, waiter, extra, server)
+        return PyObjCSocketTransport(self, sock, protocol, waiter, extra, server)
 
     async def sock_sendfile(self, sock, file, offset=0, count=None, *, fallback=True):
         if self._debug and sock.gettimeout() != 0:
