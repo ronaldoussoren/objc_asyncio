@@ -17,6 +17,7 @@ import warnings
 import weakref
 from asyncio.base_events import Server, _SendfileFallbackProtocol  # XXX
 from asyncio.selector_events import _SelectorSocketTransport as PyObjCSocketTransport
+from asyncio.staggered import staggered_race  # XXXasyncio.stagggered
 
 from Cocoa import (
     CFFileDescriptorCreate,
@@ -315,8 +316,18 @@ class SocketMixin:
                         )
                         exc = OSError(exc.errno, msg)
                         my_exceptions.append(exc)
+
+                    except TypeError as exc:
+                        msg = (
+                            f"error while attempting to bind on "
+                            f"address {laddr!r}: "
+                            f"{str(exc).lower()}"
+                        )
+                        exc = TypeError(msg)
+                        my_exceptions.append(exc)
                 else:  # all bind attempts failed
                     raise my_exceptions.pop()
+
             await self.sock_connect(sock, address)
             return sock
         except OSError as exc:
@@ -429,7 +440,7 @@ class SocketMixin:
                     except OSError:
                         continue
             else:  # using happy eyeballs
-                sock, _, _ = await asyncio.staggered_race(
+                sock, _, _ = await staggered_race(
                     (
                         functools.partial(
                             self._connect_sock, exceptions, addrinfo, laddr_infos
@@ -469,7 +480,7 @@ class SocketMixin:
                 # a dedicated API for that: create_unix_connection.
                 # Disallowing AF_UNIX in this method, breaks backwards
                 # compatibility.
-                raise ValueError(f"A Stream Socket was expected, got {sock!r}")
+                raise ValueError(f"a stream socket was expected, got {sock!r}")
 
         transport, protocol = await self._create_connection_transport(
             sock,

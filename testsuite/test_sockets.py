@@ -1488,8 +1488,220 @@ class TestLowLevelIO(utils.TestCase):
 
 
 class TestSocketHighlevel(utils.TestCase):
-    pass
+    def test_create_connection_basic(self):
+        # Basic test of the functionality. This intentionally uses
+        # a real website (at least for now)
+        class WebClientProtocol(asyncio.Protocol):
+            def __init__(self, hostname, on_connection_lost):
+                self.hostname = hostname
+                self.data = []
+                self.on_connection_lost = on_connection_lost
+
+            def connection_made(self, transport):
+                transport.write(
+                    b"GET / HTTP/1.0\r\nHost: %s\r\n\r\n" % (self.hostname.encode(),)
+                )
+
+            def data_received(self, data):
+                self.data.append(data)
+
+            def connection_lost(self, exc):
+                self.on_connection_lost.set_result((b"".join(self.data), exc))
+
+        async def main():
+            hostname = "www.nu.nl"
+            on_connection_lost = self.loop.create_future()
+            transport, protocol = await self.loop.create_connection(
+                lambda: WebClientProtocol(hostname, on_connection_lost), hostname, 80
+            )
+
+            try:
+                data, exc = await on_connection_lost
+
+            finally:
+                transport.close()
+
+            self.assertIs(exc, None)
+            self.assertIn(b"301 Moved", data)
+
+        self.loop.run_until_complete(main())
+
+    def test_create_connection_eyeballs(self):
+        # Basic test of the functionality. This intentionally uses
+        # a real website (at least for now)
+        class WebClientProtocol(asyncio.Protocol):
+            def __init__(self, hostname, on_connection_lost):
+                self.hostname = hostname
+                self.data = []
+                self.on_connection_lost = on_connection_lost
+
+            def connection_made(self, transport):
+                transport.write(
+                    b"GET / HTTP/1.0\r\nHost: %s\r\n\r\n" % (self.hostname.encode(),)
+                )
+
+            def data_received(self, data):
+                self.data.append(data)
+
+            def connection_lost(self, exc):
+                self.on_connection_lost.set_result((b"".join(self.data), exc))
+
+        async def main():
+            hostname = "www.python.org"
+            on_connection_lost = self.loop.create_future()
+            transport, protocol = await self.loop.create_connection(
+                lambda: WebClientProtocol(hostname, on_connection_lost),
+                hostname,
+                80,
+                happy_eyeballs_delay=0.25,
+            )
+
+            try:
+                data, exc = await on_connection_lost
+
+            finally:
+                transport.close()
+
+            self.assertIs(exc, None)
+            self.assertIn(b"301 Moved", data)
+
+        self.loop.run_until_complete(main())
+
+    def test_create_connection_with_localaddr(self):
+        addr, port = self.make_echoserver()
+
+        async def main():
+            message = b"hello world"
+            on_connection_lost = self.loop.create_future()
+
+            transport, protocol = await self.loop.create_connection(
+                lambda: EchoClientProtocol(message, on_connection_lost),
+                addr,
+                port,
+                local_addr=("localhost", 0),
+            )
+
+            sock = transport.get_extra_info("socket")
+            self.assertEqual(sock.getsockname()[0], "127.0.0.1")
+
+            try:
+                data = await on_connection_lost
+
+            finally:
+                transport.close()
+
+            self.assertEqual(data, b"HELLO WORLD\r\n")
+
+        self.loop.run_until_complete(main())
+
+    def test_create_connection_with_localaddr_invalid(self):
+        addr, port = self.make_echoserver()
+
+        async def main():
+            message = b"hello world"
+            on_connection_lost = self.loop.create_future()
+
+            with self.assertRaisesRegex(OSError, "error while attempting to bind"):
+                await self.loop.create_connection(
+                    lambda: EchoClientProtocol(message, on_connection_lost),
+                    addr,
+                    port,
+                    local_addr=("www.python.org", 0),
+                )
+
+        self.loop.run_until_complete(main())
+
+    def test_create_connection_with_localaddr_invalid_ipv6(self):
+        addr, port = self.make_echoserver()
+
+        async def main():
+            message = b"hello world"
+            on_connection_lost = self.loop.create_future()
+
+            with self.assertRaisesRegex(TypeError, "error while attempting to bind"):
+                await self.loop.create_connection(
+                    lambda: EchoClientProtocol(message, on_connection_lost),
+                    addr,
+                    port,
+                    local_addr=("ipv6.google.com", 0),
+                )
+
+        self.loop.run_until_complete(main())
+
+    def test_create_connection_with_socket(self):
+        addr, port = self.make_echoserver()
+
+        async def main():
+            message = b"hello world"
+            on_connection_lost = self.loop.create_future()
+
+            sd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sd.connect((addr, port))
+
+            transport, protocol = await self.loop.create_connection(
+                lambda: EchoClientProtocol(message, on_connection_lost),
+                sock=sd,
+                local_addr=("localhost", 0),
+            )
+
+            sock = transport.get_extra_info("socket")
+            self.assertEqual(sock.getsockname(), sd.getsockname())
+
+            try:
+                data = await on_connection_lost
+
+            finally:
+                transport.close()
+
+            self.assertEqual(data, b"HELLO WORLD\r\n")
+
+        self.loop.run_until_complete(main())
+
+    def test_create_connection_with_socket_udp(self):
+        async def main():
+            message = b"hello world"
+            on_connection_lost = self.loop.create_future()
+
+            sd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, 0)
+            self.addCleanup(sd.close)
+
+            with self.assertRaisesRegex(ValueError, "a stream socket was expected"):
+                await self.loop.create_connection(
+                    lambda: EchoClientProtocol(message, on_connection_lost), sock=sd
+                )
+
+        self.loop.run_until_complete(main())
+
+    def test_create_connection_without_info(self):
+        async def main():
+            message = b"hello world"
+            on_connection_lost = self.loop.create_future()
+
+            with self.assertRaisesRegex(
+                ValueError, "host and port was not specified and no sock specified"
+            ):
+                await self.loop.create_connection(
+                    lambda: EchoClientProtocol(message, on_connection_lost)
+                )
+
+        self.loop.run_until_complete(main())
 
 
 class TestSocketTLS(utils.TestCase):
     pass
+
+
+class EchoClientProtocol(asyncio.Protocol):
+    def __init__(self, message, on_connection_lost):
+        self.message = message
+        self.data = []
+        self.on_connection_lost = on_connection_lost
+
+    def connection_made(self, transport):
+        transport.write(self.message + b"\r\n")
+
+    def data_received(self, data):
+        self.data.append(data)
+
+    def connection_lost(self, exc):
+        self.on_connection_lost.set_result(b"".join(self.data))

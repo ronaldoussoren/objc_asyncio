@@ -4,6 +4,7 @@ import io
 import logging
 import signal
 import socket
+import threading
 import unittest
 
 import objc_asyncio
@@ -68,6 +69,29 @@ class TestCase(unittest.TestCase):
         sd2.setblocking(False)
 
         return sd1, sd2
+
+    def make_echoserver(self, family=socket.AF_INET):
+        sd_serv = socket.socket(family, socket.SOCK_STREAM, 0)
+        sd_serv.listen(5)
+        self.addCleanup(sd_serv.close)
+
+        def runloop():
+            try:
+                while True:
+                    sd, addr = sd_serv.accept()
+
+                    data = sd.recv(100)
+                    data = data.upper()
+                    sd.sendall(data)
+                    sd.close()
+
+            except socket.error:
+                pass
+
+        thr = threading.Thread(target=runloop)
+        thr.start()
+
+        return sd_serv.getsockname()
 
 
 class EchoServerProtocol(asyncio.Protocol):
