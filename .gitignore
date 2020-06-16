@@ -8,6 +8,7 @@ workenv
 .mypy_cache
 .tox
 _build
+TODO.txt
 
 syntax: glob
 *.so
