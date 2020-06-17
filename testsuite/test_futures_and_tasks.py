@@ -1,4 +1,5 @@
 import asyncio
+import sys
 
 from . import utils
 
@@ -18,10 +19,11 @@ class TestFuturesAndTasks(utils.TestCase):
         self.assertIsInstance(task, asyncio.Task)
         self.loop.run_until_complete(task)
 
-        task = self.loop.create_task(coro(), name="My Name")
-        self.assertIsInstance(task, asyncio.Task)
-        self.assertEqual(task.get_name(), "My Name")
-        self.loop.run_until_complete(task)
+        if sys.version_info[:2] > (3, 7):
+            task = self.loop.create_task(coro(), name="My Name")
+            self.assertIsInstance(task, asyncio.Task)
+            self.assertEqual(task.get_name(), "My Name")
+            self.loop.run_until_complete(task)
 
     def test_create_task_with_factory(self):
         async def coro():
@@ -39,10 +41,11 @@ class TestFuturesAndTasks(utils.TestCase):
         self.assertIsInstance(task, MyTask)
         self.loop.run_until_complete(task)
 
-        task = self.loop.create_task(coro(), name="My Name")
-        self.assertIsInstance(task, MyTask)
-        self.assertEqual(task.get_name(), "My Name")
-        self.loop.run_until_complete(task)
+        if sys.version_info[:2] > (3, 7):
+            task = self.loop.create_task(coro(), name="My Name")
+            self.assertIsInstance(task, MyTask)
+            self.assertEqual(task.get_name(), "My Name")
+            self.loop.run_until_complete(task)
 
     def test_task_factory(self):
         self.assertIs(self.loop.get_task_factory(), None)

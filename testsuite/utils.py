@@ -99,5 +99,5 @@ class EchoServerProtocol(asyncio.Protocol):
         self.transport = transport
 
     def data_received(self, data):
-        self.transport.write(data)
+        self.transport.write(data.upper())
         self.transport.close()

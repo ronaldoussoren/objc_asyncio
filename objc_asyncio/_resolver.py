@@ -1,8 +1,33 @@
 """Resolver mixin"""
+import collections
+import itertools
 import socket
-from asyncio.base_events import _interleave_addrinfos, _ipaddr_info  # noqa: F401
+from asyncio.base_events import _ipaddr_info  # noqa: F401
 
 from ._log import logger
+
+
+def _interleave_addrinfos(addrinfos, first_address_family_count=1):
+    """Interleave list of addrinfo tuples by family."""
+    # Group addresses by family
+    addrinfos_by_family = collections.OrderedDict()
+    for addr in addrinfos:
+        family = addr[0]
+        if family not in addrinfos_by_family:
+            addrinfos_by_family[family] = []
+        addrinfos_by_family[family].append(addr)
+    addrinfos_lists = list(addrinfos_by_family.values())
+
+    reordered = []
+    if first_address_family_count > 1:
+        reordered.extend(addrinfos_lists[0][: first_address_family_count - 1])
+        del addrinfos_lists[0][: first_address_family_count - 1]
+    reordered.extend(
+        a
+        for a in itertools.chain.from_iterable(itertools.zip_longest(*addrinfos_lists))
+        if a is not None
+    )
+    return reordered
 
 
 class ResolverMixin:

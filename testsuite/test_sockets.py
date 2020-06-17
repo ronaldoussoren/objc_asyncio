@@ -1686,6 +1686,73 @@ class TestSocketHighlevel(utils.TestCase):
 
         self.loop.run_until_complete(main())
 
+    def test_create_connection_with_sock_and_info(self):
+        addr, port = self.make_echoserver()
+
+        async def main():
+            message = b"hello world"
+            on_connection_lost = self.loop.create_future()
+
+            sd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sd.connect((addr, port))
+            self.addCleanup(sd.close)
+
+            with self.assertRaisesRegex(
+                ValueError, "host/port and sock can not be specified at the same time"
+            ):
+                await self.loop.create_connection(
+                    lambda: EchoClientProtocol(message, on_connection_lost),
+                    addr,
+                    port,
+                    sock=sd,
+                )
+
+        self.loop.run_until_complete(main())
+
+    def test_create_connection_no_such_host(self):
+        async def main():
+            message = b"hello world"
+            on_connection_lost = self.loop.create_future()
+
+            with self.assertRaises(OSError):
+                await self.loop.create_connection(
+                    lambda: EchoClientProtocol(message, on_connection_lost),
+                    "nosuchhost.python.org",
+                    80,
+                )
+
+        self.loop.run_until_complete(main())
+
+    def test_create_server_basic(self):
+        async def main():
+            server = await self.loop.create_server(
+                utils.EchoServerProtocol, host="127.0.0.1", port=0
+            )
+            self.assertIsInstance(server, asyncio.AbstractServer)
+
+            async with server:
+                await server.start_serving()
+
+                addr, port = server.sockets[0].getsockname()
+
+                on_connection_lost = self.loop.create_future()
+
+                transport, protocol = await self.loop.create_connection(
+                    lambda: EchoClientProtocol(b"hello world", on_connection_lost),
+                    addr,
+                    port,
+                )
+
+                try:
+                    data = await on_connection_lost
+
+                finally:
+                    transport.close()
+
+                self.assertEqual(data, b"HELLO WORLD\r\n")
+
+        self.loop.run_until_complete(main())
+
 
 class TestSocketTLS(utils.TestCase):
     pass

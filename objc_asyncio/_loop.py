@@ -436,11 +436,18 @@ class PyObjCEventLoop(
         if self._task_factory is not None:
             task = self._task_factory(self, coro)
             if name is not None:
+                if sys.version_info[:3] == (3, 7):
+                    raise ValueError("Name is not supported on Python 3.7")
                 task.set_name(name)
             return task
 
         else:
-            return asyncio.Task(coro, loop=self, name=name)
+            if name is not None:
+                if sys.version_info[:3] == (3, 7):
+                    raise ValueError("Name is not supported on Python 3.7")
+                return asyncio.Task(coro, loop=self, name=name)
+            else:
+                return asyncio.Task(coro, loop=self)
 
     def set_task_factory(self, factory):
         if factory is not None and not callable(factory):

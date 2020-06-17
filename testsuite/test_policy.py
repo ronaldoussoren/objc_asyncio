@@ -123,7 +123,7 @@ class TestEventLoopPolicy(unittest.TestCase):
     def test_set_child_watcher(self):
         p = objc_asyncio.PyObjCEventLoopPolicy()
 
-        watcher = asyncio.ThreadedChildWatcher()
+        watcher = asyncio.SafeChildWatcher()
 
         p.set_child_watcher(watcher)
         self.assertIs(p.get_child_watcher(), watcher)

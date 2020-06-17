@@ -15,9 +15,9 @@ import ssl
 import stat
 import warnings
 import weakref
+from asyncio import trsock  # XXX
 from asyncio.base_events import Server, _SendfileFallbackProtocol  # XXX
 from asyncio.selector_events import _SelectorSocketTransport as PyObjCSocketTransport
-from asyncio.staggered import staggered_race  # XXXasyncio.stagggered
 
 from Cocoa import (
     CFFileDescriptorCreate,
@@ -34,12 +34,20 @@ from Cocoa import (
 # from ._debug import traceexceptions
 from ._log import logger
 from ._resolver import _interleave_addrinfos, _ipaddr_info
+from ._staggered import staggered_race
 
 _unset = object()
 
 # Used in sendfile fallback code (which is used when
 # the native API cannot be used).
 SENDFILE_FALLBACK_READBUFFER_SIZE = 1024 * 256
+
+# Number of seconds to wait for SSL handshake to complete
+# The default timeout matches that of Nginx.
+SSL_HANDSHAKE_TIMEOUT = 60.0
+
+# Seconds to wait before retrying accept().
+ACCEPT_RETRY_DELAY = 1
 
 
 class _SendfileMode(enum.Enum):
@@ -884,7 +892,7 @@ class SocketMixin:
 
     async def _create_server_getaddrinfo(self, host, port, family, flags):
         infos = await self._ensure_resolved(
-            (host, port), family=family, type=socket.SOCK_STREAM, flags=flags, loop=self
+            (host, port), family=family, type=socket.SOCK_STREAM, flags=flags
         )
         if not infos:
             raise OSError(f"getaddrinfo({host!r}) returned empty list")
@@ -1015,6 +1023,148 @@ class SocketMixin:
         if self._debug:
             logger.info("%r is serving", server)
         return server
+
+    def _stop_serving(self, sock):
+        self._remove_reader(sock.fileno())
+        sock.close()
+
+    def _start_serving(
+        self,
+        protocol_factory,
+        sock,
+        sslcontext=None,
+        server=None,
+        backlog=100,
+        ssl_handshake_timeout=SSL_HANDSHAKE_TIMEOUT,
+    ):
+        self._add_reader(
+            sock.fileno(),
+            self._accept_connection,
+            protocol_factory,
+            sock,
+            sslcontext,
+            server,
+            backlog,
+            ssl_handshake_timeout,
+        )
+
+    def _accept_connection(
+        self,
+        protocol_factory,
+        sock,
+        sslcontext=None,
+        server=None,
+        backlog=100,
+        ssl_handshake_timeout=SSL_HANDSHAKE_TIMEOUT,
+    ):
+        # This method is only called once for each event loop tick where the
+        # listening socket has triggered an EVENT_READ. There may be multiple
+        # connections waiting for an .accept() so it is called in a loop.
+        # See https://bugs.python.org/issue27906 for more details.
+        for _ in range(backlog):
+            try:
+                conn, addr = sock.accept()
+                if self._debug:
+                    logger.debug(
+                        "%r got a new connection from %r: %r", server, addr, conn
+                    )
+                conn.setblocking(False)
+            except (BlockingIOError, InterruptedError, ConnectionAbortedError):
+                # Early exit because the socket accept buffer is empty.
+                return None
+            except OSError as exc:
+                # There's nowhere to send the error, so just log it.
+                if exc.errno in (
+                    errno.EMFILE,
+                    errno.ENFILE,
+                    errno.ENOBUFS,
+                    errno.ENOMEM,
+                ):
+                    # Some platforms (e.g. Linux keep reporting the FD as
+                    # ready, so we remove the read handler temporarily.
+                    # We'll try again in a while.
+                    self.call_exception_handler(
+                        {
+                            "message": "socket.accept() out of system resource",
+                            "exception": exc,
+                            "socket": trsock.TransportSocket(sock),
+                        }
+                    )
+                    self._remove_reader(sock.fileno())
+                    self.call_later(
+                        ACCEPT_RETRY_DELAY,
+                        self._start_serving,
+                        protocol_factory,
+                        sock,
+                        sslcontext,
+                        server,
+                        backlog,
+                        ssl_handshake_timeout,
+                    )
+                else:
+                    raise  # The event loop will catch, log and ignore it.
+            else:
+                extra = {"peername": addr}
+                accept = self._accept_connection2(
+                    protocol_factory,
+                    conn,
+                    extra,
+                    sslcontext,
+                    server,
+                    ssl_handshake_timeout,
+                )
+                self.create_task(accept)
+
+    async def _accept_connection2(
+        self,
+        protocol_factory,
+        conn,
+        extra,
+        sslcontext=None,
+        server=None,
+        ssl_handshake_timeout=SSL_HANDSHAKE_TIMEOUT,
+    ):
+        protocol = None
+        transport = None
+        try:
+            protocol = protocol_factory()
+            waiter = self.create_future()
+            if sslcontext:
+                transport = self._make_ssl_transport(
+                    conn,
+                    protocol,
+                    sslcontext,
+                    waiter=waiter,
+                    server_side=True,
+                    extra=extra,
+                    server=server,
+                    ssl_handshake_timeout=ssl_handshake_timeout,
+                )
+            else:
+                transport = self._make_socket_transport(
+                    conn, protocol, waiter=waiter, extra=extra, server=server
+                )
+
+            try:
+                await waiter
+            except BaseException:
+                transport.close()
+                raise
+                # It's now up to the protocol to handle the connection.
+
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException as exc:
+            if self._debug:
+                context = {
+                    "message": "Error on transport creation for incoming connection",
+                    "exception": exc,
+                }
+                if protocol is not None:
+                    context["protocol"] = protocol
+                if transport is not None:
+                    context["transport"] = transport
+                self.call_exception_handler(context)
 
     async def connect_accepted_socket(
         self, protocol_factory, sock, *, ssl=None, ssl_handshake_timeout=None
