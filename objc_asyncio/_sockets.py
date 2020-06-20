@@ -3,7 +3,6 @@
 
 import asyncio
 import collections
-import enum
 import errno
 import functools
 import io
@@ -17,6 +16,10 @@ import warnings
 import weakref
 from asyncio import trsock  # XXX
 from asyncio.base_events import Server, _SendfileFallbackProtocol  # XXX
+from asyncio.constants import _SendfileMode
+from asyncio.selector_events import (
+    _SelectorDatagramTransport as PyObjCDatagramTransport,
+)
 from asyncio.selector_events import _SelectorSocketTransport as PyObjCSocketTransport
 
 from Cocoa import (
@@ -50,10 +53,10 @@ SSL_HANDSHAKE_TIMEOUT = 60.0
 ACCEPT_RETRY_DELAY = 1
 
 
-class _SendfileMode(enum.Enum):
-    UNSUPPORTED = enum.auto()
-    TRY_NATIVE = enum.auto()
-    FALLBACK = enum.auto()
+# class _SendfileMode(enum.Enum):
+# UNSUPPORTED = enum.auto()
+# TRY_NATIVE = enum.auto()
+# FALLBACK = enum.auto()
 
 
 def _check_ssl_socket(sock):
@@ -640,9 +643,6 @@ class SocketMixin:
         Return a new transport that *protocol* should start using
         immediately.
         """
-        if ssl is None:
-            raise RuntimeError("Python ssl module is not available")
-
         if not isinstance(sslcontext, ssl.SSLContext):
             raise TypeError(
                 f"sslcontext is expected to be an instance of ssl.SSLContext, "
@@ -844,7 +844,7 @@ class SocketMixin:
 
         protocol = protocol_factory()
         waiter = self.create_future()
-        transport = self._make_datagram_transport(sock, protocol, r_addr, waiter)
+        transport = PyObjCDatagramTransport(self, sock, protocol, r_addr, waiter, None)
         if self._debug:
             if local_addr:
                 logger.info(
@@ -1142,7 +1142,7 @@ class SocketMixin:
                 )
             else:
                 transport = self._make_socket_transport(
-                    conn, protocol, waiter=waiter, extra=extra, server=server
+                    conn, protocol, waiter, extra=extra, server=server
                 )
 
             try:

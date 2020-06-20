@@ -10,11 +10,9 @@ from ._log import logger
 def _interleave_addrinfos(addrinfos, first_address_family_count=1):
     """Interleave list of addrinfo tuples by family."""
     # Group addresses by family
-    addrinfos_by_family = collections.OrderedDict()
+    addrinfos_by_family = collections.defaultdict(list)
     for addr in addrinfos:
         family = addr[0]
-        if family not in addrinfos_by_family:
-            addrinfos_by_family[family] = []
         addrinfos_by_family[family].append(addr)
     addrinfos_lists = list(addrinfos_by_family.values())
 

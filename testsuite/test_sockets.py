@@ -4,8 +4,11 @@ import io
 import os
 import socket
 import tempfile
+import threading
 import time
 import unittest.mock
+
+import objc_asyncio._sockets
 
 from . import utils
 
@@ -1753,9 +1756,263 @@ class TestSocketHighlevel(utils.TestCase):
 
         self.loop.run_until_complete(main())
 
+    def test_sendfile_unsupported(self):
+        class MyTransport(asyncio.Transport):
+            def is_closing(self):
+                return False
+
+        with self.subTest("attribute missing"):
+
+            async def main():
+                with open(__file__, "rb") as stream:
+                    with self.assertRaisesRegex(
+                        RuntimeError, "sendfile is not supported for transport"
+                    ):
+                        await self.loop.sendfile(MyTransport(), stream)
+
+            self.loop.run_until_complete(main())
+
+        with self.subTest("attribute UNSUPOORTED"):
+            MyTransport._sendfile_compatible = (
+                objc_asyncio._sockets._SendfileMode.UNSUPPORTED
+            )
+
+            async def main():
+                with open(__file__, "rb") as stream:
+                    with self.assertRaisesRegex(
+                        RuntimeError, "sendfile is not supported for transport"
+                    ):
+                        await self.loop.sendfile(MyTransport(), stream)
+
+            self.loop.run_until_complete(main())
+
+    def sendfile_shared(self, on_connection_made):
+        server_sd = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
+        server_sd.bind(("127.0.0.1", 0))
+        server_sd.listen(5)
+        self.addCleanup(server_sd.close)
+
+        data = []
+
+        def receiver():
+            nonlocal data
+
+            sd, _ = server_sd.accept()
+
+            try:
+                while True:
+                    b = sd.recv(1024)
+                    if not b:
+                        break
+
+                    data.append(b)
+            finally:
+                sd.close()
+
+        thr = threading.Thread(target=receiver)
+        thr.start()
+
+        async def main():
+            on_connection_lost = self.loop.create_future()
+            transport, protocol = await self.loop.create_connection(
+                lambda: SendFileProtocol(on_connection_made, on_connection_lost),
+                *server_sd.getsockname(),
+            )
+
+            try:
+                result = await on_connection_lost
+                if protocol.task is not None:
+                    await protocol.task
+
+            finally:
+                transport.close()
+
+            self.assertIs(result, None)
+
+        self.loop.run_until_complete(main())
+
+        thr.join()
+        return b"".join(data)
+
+    def test_sendfile_basic(self):
+        async def on_connection_made(transport):
+            try:
+                with open(__file__, "rb") as stream:
+                    await self.loop.sendfile(transport, stream)
+
+            finally:
+                transport.close()
+
+        data = self.sendfile_shared(on_connection_made)
+        with open(__file__, "rb") as stream:
+            self.assertEqual(data, stream.read())
+
+    def test_sendfile_offset(self):
+        OFFSET = 100
+
+        async def on_connection_made(transport):
+            try:
+                with open(__file__, "rb") as stream:
+                    await self.loop.sendfile(transport, stream, offset=OFFSET)
+
+            finally:
+                transport.close()
+
+        data = self.sendfile_shared(on_connection_made)
+        with open(__file__, "rb") as stream:
+            self.assertEqual(data, stream.read()[OFFSET:])
+
+    def test_sendfile_count(self):
+        COUNT = 100
+
+        async def on_connection_made(transport):
+            try:
+                with open(__file__, "rb") as stream:
+                    await self.loop.sendfile(transport, stream, count=COUNT)
+
+            finally:
+                transport.close()
+
+        data = self.sendfile_shared(on_connection_made)
+        with open(__file__, "rb") as stream:
+            self.assertEqual(data, stream.read()[:COUNT])
+
+    def test_sendfile_fallback_not_taken_native_transport(self):
+        async def on_connection_made(transport):
+            try:
+                stream = io.BytesIO()
+
+                with self.assertRaisesRegex(RuntimeError, "not a regular file"):
+                    await self.loop.sendfile(transport, stream, fallback=False)
+
+            finally:
+                transport.close()
+
+        data = self.sendfile_shared(on_connection_made)
+        self.assertEqual(data, b"")
+
+    def test_sendfile_fallback_not_taken_fallback_transport(self):
+        async def on_connection_made(transport):
+            try:
+                transport._sendfile_compatible = (
+                    objc_asyncio._sockets._SendfileMode.FALLBACK
+                )
+
+                stream = io.BytesIO()
+
+                with self.assertRaisesRegex(
+                    RuntimeError, "fallback is disabled and native sendfile"
+                ):
+                    await self.loop.sendfile(transport, stream, fallback=False)
+
+            finally:
+                transport.close()
+
+        data = self.sendfile_shared(on_connection_made)
+        self.assertEqual(data, b"")
+
+    def test_sendfile_fallback(self):
+        MESSAGE = b"hello world" * 1024
+
+        async def on_connection_made(transport):
+            try:
+                stream = io.BytesIO()
+                stream.write(MESSAGE)
+                stream.seek(0)
+
+                await self.loop.sendfile(transport, stream)
+
+            finally:
+                transport.close()
+
+        data = self.sendfile_shared(on_connection_made)
+        self.assertEqual(data, MESSAGE)
+
+    def test_sendfile_fallback_offset(self):
+        MESSAGE = b"hello world" * 1024
+        OFFSET = 4535
+
+        async def on_connection_made(transport):
+            try:
+                stream = io.BytesIO()
+                stream.write(MESSAGE)
+                stream.seek(0)
+
+                await self.loop.sendfile(transport, stream, offset=OFFSET)
+
+            finally:
+                transport.close()
+
+        data = self.sendfile_shared(on_connection_made)
+        self.assertEqual(data, MESSAGE[OFFSET:])
+
+    def test_sendfile_fallback_offset_count(self):
+        MESSAGE = b"hello world" * 1024
+        OFFSET = 4535
+        COUNT = 655
+
+        async def on_connection_made(transport):
+            try:
+                stream = io.BytesIO()
+                stream.write(MESSAGE)
+                stream.seek(0)
+
+                await self.loop.sendfile(transport, stream, offset=OFFSET, count=COUNT)
+
+            finally:
+                transport.close()
+
+        data = self.sendfile_shared(on_connection_made)
+        self.assertEqual(data, MESSAGE[OFFSET : OFFSET + COUNT])
+
+    def test_sendfile_closing(self):
+        async def on_connection_made(transport):
+            transport.close()
+
+            with open(__file__, "rb") as stream:
+                with self.assertRaisesRegex(RuntimeError, "Transport is closing"):
+                    await self.loop.sendfile(transport, stream)
+
+        data = self.sendfile_shared(on_connection_made)
+        self.assertEqual(data, b"")
+
+    def test_create_datagram_endpoint_basic(self):
+        class DummyProtocol(asyncio.DatagramProtocol):
+            def datagram_received(self, data, addr):
+                pass
+
+            def error_received(self, exc):
+                pass
+
+        async def main():
+            transport, protocol = await self.loop.create_datagram_endpoint(
+                DummyProtocol, ("127.0.0.1", 0)
+            )
+
+            self.assertIsInstance(transport, objc_asyncio.PyObjCDatagramTransport)
+            self.assertIsInstance(protocol, DummyProtocol)
+
+        self.loop.run_until_complete(main())
+
 
 class TestSocketTLS(utils.TestCase):
     pass
+
+
+class SendFileProtocol(asyncio.Protocol):
+    def __init__(self, on_connection_made, on_connection_lost):
+        self.on_connection_made = on_connection_made
+        self.on_connection_lost = on_connection_lost
+        self.task = None
+
+    def connection_made(self, transport):
+        self.task = asyncio.Task(self.on_connection_made(transport))
+
+    def data_received(self, data):
+        pass
+
+    def connection_lost(self, exc):
+        self.on_connection_lost.set_result(None)
 
 
 class EchoClientProtocol(asyncio.Protocol):

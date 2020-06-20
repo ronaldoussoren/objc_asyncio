@@ -12,5 +12,5 @@ from ._loop import (  # noqa: F401
     PyObjCWritePipeTransport,
 )
 from ._loop_policy import PyObjCEventLoopPolicy  # noqa: F401
-from ._sockets import PyObjCSocketTransport  # noqa: F401
+from ._sockets import PyObjCDatagramTransport, PyObjCSocketTransport  # noqa: F401
 from ._subprocess import KQueueChildWatcher  # noqa: F401
