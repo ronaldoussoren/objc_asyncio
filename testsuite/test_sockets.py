@@ -1994,6 +1994,37 @@ class TestSocketHighlevel(utils.TestCase):
 
         self.loop.run_until_complete(main())
 
+    def test_connect_accepted_socket_basic(self):
+        async def main():
+            sd1, sd2 = self.make_socketpair()
+
+            try:
+                transport, protocol = await self.loop.connect_accepted_socket(
+                    utils.EchoServerProtocol, sd1
+                )
+
+                await self.loop.sock_sendall(sd2, b"hello world")
+                data = await self.loop.sock_recv(sd2, 1024)
+
+                self.assertEqual(data, b"HELLO WORLD")
+
+            finally:
+                transport.close()
+
+        self.loop.run_until_complete(main())
+
+    def test_connect_accepted_socket_not_stream(self):
+        async def main():
+            sd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, 0)
+            sd.bind(("127.0.0.1", 0))
+            sd.setblocking(False)
+            self.addCleanup(sd.close)
+
+            with self.assertRaisesRegex(ValueError, "a stream socket was expected"):
+                await self.loop.connect_accepted_socket(utils.EchoServerProtocol, sd)
+
+        self.loop.run_until_complete(main())
+
 
 class TestSocketTLS(utils.TestCase):
     pass

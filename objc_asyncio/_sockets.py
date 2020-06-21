@@ -1178,7 +1178,7 @@ class SocketMixin:
         returns a (transport, protocol) pair.
         """
         if sock.type != socket.SOCK_STREAM:
-            raise ValueError(f"A Stream Socket was expected, got {sock!r}")
+            raise ValueError(f"a stream socket was expected, got {sock!r}")
 
         if ssl_handshake_timeout is not None and not ssl:
             raise ValueError("ssl_handshake_timeout is only meaningful with ssl")
