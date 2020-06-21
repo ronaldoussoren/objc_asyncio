@@ -21,6 +21,7 @@ from asyncio.selector_events import (
     _SelectorDatagramTransport as PyObjCDatagramTransport,
 )
 from asyncio.selector_events import _SelectorSocketTransport as PyObjCSocketTransport
+from asyncio.sslproto import SSLProtocol  # XXX
 
 from Cocoa import (
     CFFileDescriptorCreate,
@@ -545,6 +546,31 @@ class SocketMixin:
 
         return transport, protocol
 
+    def _make_ssl_transport(
+        self,
+        rawsock,
+        protocol,
+        sslcontext,
+        waiter=None,
+        *,
+        server_side=False,
+        server_hostname=None,
+        extra=None,
+        server=None,
+        ssl_handshake_timeout=SSL_HANDSHAKE_TIMEOUT,
+    ):
+        ssl_protocol = SSLProtocol(
+            self,
+            protocol,
+            sslcontext,
+            waiter,
+            server_side,
+            server_hostname,
+            ssl_handshake_timeout=ssl_handshake_timeout,
+        )
+        PyObjCSocketTransport(self, rawsock, ssl_protocol, extra=extra, server=server)
+        return ssl_protocol._app_transport
+
     async def sendfile(self, transport, file, offset=0, count=None, *, fallback=True):
         """Send a file to transport.
 
@@ -699,7 +725,7 @@ class SocketMixin:
         """Create datagram connection."""
         if sock is not None:
             if sock.type != socket.SOCK_DGRAM:
-                raise ValueError(f"A UDP Socket was expected, got {sock!r}")
+                raise ValueError(f"a datagram socket was expected, got {sock!r}")
             if (
                 local_addr
                 or remote_addr
@@ -708,6 +734,7 @@ class SocketMixin:
                 or flags
                 or reuse_port
                 or allow_broadcast
+                or reuse_address is not _unset
             ):
                 # show the problematic kwargs in exception msg
                 opts = {

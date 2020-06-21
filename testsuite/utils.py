@@ -2,10 +2,13 @@ import asyncio
 import contextlib
 import io
 import logging
+import os
 import signal
 import socket
+import ssl
 import threading
 import unittest
+from test.support import TEST_HOME_DIR
 
 import objc_asyncio
 from objc_asyncio._log import logger
@@ -101,3 +104,50 @@ class EchoServerProtocol(asyncio.Protocol):
     def data_received(self, data):
         self.transport.write(data.upper())
         self.transport.close()
+
+
+ONLYCERT = os.path.join(TEST_HOME_DIR, "ssl_cert.pem")
+ONLYKEY = os.path.join(TEST_HOME_DIR, "ssl_key.pem")
+SIGNED_CERTFILE = os.path.join(TEST_HOME_DIR, "keycert3.pem")
+SIGNING_CA = os.path.join(TEST_HOME_DIR, "pycacert.pem")
+PEERCERT = {
+    "OCSP": ("http://testca.pythontest.net/testca/ocsp/",),
+    "caIssuers": ("http://testca.pythontest.net/testca/pycacert.cer",),
+    "crlDistributionPoints": ("http://testca.pythontest.net/testca/revocation.crl",),
+    "issuer": (
+        (("countryName", "XY"),),
+        (("organizationName", "Python Software Foundation CA"),),
+        (("commonName", "our-ca-server"),),
+    ),
+    "notAfter": "Jul  7 14:23:16 2028 GMT",
+    "notBefore": "Aug 29 14:23:16 2018 GMT",
+    "serialNumber": "CB2D80995A69525C",
+    "subject": (
+        (("countryName", "XY"),),
+        (("localityName", "Castle Anthrax"),),
+        (("organizationName", "Python Software Foundation"),),
+        (("commonName", "localhost"),),
+    ),
+    "subjectAltName": (("DNS", "localhost"),),
+    "version": 3,
+}
+
+
+def simple_server_sslcontext():
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(ONLYCERT, ONLYKEY)
+    server_context.check_hostname = False
+    server_context.verify_mode = ssl.CERT_NONE
+    return server_context
+
+
+def simple_client_sslcontext(*, disable_verify=True):
+    client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    client_context.check_hostname = False
+    if disable_verify:
+        client_context.verify_mode = ssl.CERT_NONE
+    return client_context
+
+
+def dummy_ssl_context():
+    return ssl.SSLContext(ssl.PROTOCOL_TLS)

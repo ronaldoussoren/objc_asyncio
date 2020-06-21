@@ -1494,23 +1494,6 @@ class TestSocketHighlevel(utils.TestCase):
     def test_create_connection_basic(self):
         # Basic test of the functionality. This intentionally uses
         # a real website (at least for now)
-        class WebClientProtocol(asyncio.Protocol):
-            def __init__(self, hostname, on_connection_lost):
-                self.hostname = hostname
-                self.data = []
-                self.on_connection_lost = on_connection_lost
-
-            def connection_made(self, transport):
-                transport.write(
-                    b"GET / HTTP/1.0\r\nHost: %s\r\n\r\n" % (self.hostname.encode(),)
-                )
-
-            def data_received(self, data):
-                self.data.append(data)
-
-            def connection_lost(self, exc):
-                self.on_connection_lost.set_result((b"".join(self.data), exc))
-
         async def main():
             hostname = "www.nu.nl"
             on_connection_lost = self.loop.create_future()
@@ -1532,22 +1515,6 @@ class TestSocketHighlevel(utils.TestCase):
     def test_create_connection_eyeballs(self):
         # Basic test of the functionality. This intentionally uses
         # a real website (at least for now)
-        class WebClientProtocol(asyncio.Protocol):
-            def __init__(self, hostname, on_connection_lost):
-                self.hostname = hostname
-                self.data = []
-                self.on_connection_lost = on_connection_lost
-
-            def connection_made(self, transport):
-                transport.write(
-                    b"GET / HTTP/1.0\r\nHost: %s\r\n\r\n" % (self.hostname.encode(),)
-                )
-
-            def data_received(self, data):
-                self.data.append(data)
-
-            def connection_lost(self, exc):
-                self.on_connection_lost.set_result((b"".join(self.data), exc))
 
         async def main():
             hostname = "www.python.org"
@@ -1726,6 +1693,40 @@ class TestSocketHighlevel(utils.TestCase):
 
         self.loop.run_until_complete(main())
 
+    def test_create_connection_unnecessary_server_hostname(self):
+        async def main():
+            message = b"hello world"
+            on_connection_lost = self.loop.create_future()
+
+            with self.assertRaisesRegex(
+                ValueError, "server_hostname is only meaningful"
+            ):
+                await self.loop.create_connection(
+                    lambda: EchoClientProtocol(message, on_connection_lost),
+                    "www.python.org",
+                    80,
+                    server_hostname="www.python.org",
+                )
+
+        self.loop.run_until_complete(main())
+
+    def test_create_connection_unnecessary_ssl_timeout(self):
+        async def main():
+            message = b"hello world"
+            on_connection_lost = self.loop.create_future()
+
+            with self.assertRaisesRegex(
+                ValueError, "ssl_handshake_timeout is only meaningful"
+            ):
+                await self.loop.create_connection(
+                    lambda: EchoClientProtocol(message, on_connection_lost),
+                    "www.python.org",
+                    80,
+                    ssl_handshake_timeout=4,
+                )
+
+        self.loop.run_until_complete(main())
+
     def test_create_server_basic(self):
         async def main():
             server = await self.loop.create_server(
@@ -1753,6 +1754,30 @@ class TestSocketHighlevel(utils.TestCase):
                     transport.close()
 
                 self.assertEqual(data, b"HELLO WORLD\r\n")
+
+        self.loop.run_until_complete(main())
+
+    def test_create_server_unneeded_ssltime(self):
+        async def main():
+            with self.assertRaisesRegex(ValueError, "ssl_handshake_timeout is only"):
+                await self.loop.create_server(
+                    utils.EchoServerProtocol, "127.0.0.1", 0, ssl_handshake_timeout=4
+                )
+
+        self.loop.run_until_complete(main())
+
+    def test_create_server_host_and_sock(self):
+        async def main():
+            sd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sd.listen(5)
+            self.addCleanup(sd.close)
+
+            with self.assertRaisesRegex(
+                ValueError, "host/port and sock can not be specified"
+            ):
+                await self.loop.create_server(
+                    utils.EchoServerProtocol, "127.0.0.1", 0, sock=sd
+                )
 
         self.loop.run_until_complete(main())
 
@@ -2025,9 +2050,226 @@ class TestSocketHighlevel(utils.TestCase):
 
         self.loop.run_until_complete(main())
 
+    def test_create_datagram_endpoint_socket(self):
+        async def main():
+            sd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sd.bind(("127.0.0.1", 0))
+
+            transport, protocol = await self.loop.create_datagram_endpoint(
+                utils.EchoServerProtocol, sock=sd
+            )
+
+            try:
+                sock = transport.get_extra_info("socket")
+                self.assertEqual(sock.getsockname(), sd.getsockname())
+
+            finally:
+                transport.close()
+
+        self.loop.run_until_complete(main())
+
+    def test_create_datagram_endpoint_socket_kwargs(self):
+        async def main():
+            sd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sd.bind(("127.0.0.1", 0))
+            self.addCleanup(sd.close)
+
+            for kw in (
+                "local_addr",
+                "remote_addr",
+                "family",
+                "proto",
+                "flags",
+                "reuse_address",
+                "reuse_port",
+                "allow_broadcast",
+            ):
+                with self.subTest(keyword=kw):
+                    with self.assertRaisesRegex(ValueError, "socket modifier keyword"):
+                        await self.loop.create_datagram_endpoint(
+                            utils.EchoServerProtocol, sock=sd, **{kw: True}
+                        )
+
+        self.loop.run_until_complete(main())
+
+    def test_create_datagram_endpoint_socket_stream(self):
+        async def main():
+            sd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sd.bind(("127.0.0.1", 0))
+            self.addCleanup(sd.close)
+
+            with self.assertRaisesRegex(ValueError, "a datagram socket was expected"):
+                await self.loop.create_datagram_endpoint(
+                    utils.EchoServerProtocol, sock=sd
+                )
+
+        self.loop.run_until_complete(main())
+
+    def test_create_datagram_endpoint_basic_server(self):
+        async def main():
+            transport, protocol = await self.loop.create_datagram_endpoint(
+                utils.EchoServerProtocol, local_addr=("127.0.0.1", 0)
+            )
+
+            try:
+                self.assertIsInstance(transport, objc_asyncio.PyObjCDatagramTransport)
+                self.assertIsInstance(protocol, utils.EchoServerProtocol)
+
+            finally:
+                transport.close()
+
+        self.loop.run_until_complete(main())
+
+    def test_create_datagram_endpoint_basic_client(self):
+        async def main():
+            transport, protocol = await self.loop.create_datagram_endpoint(
+                utils.EchoServerProtocol, remote_addr=("127.0.0.1", 9)
+            )
+
+            try:
+                self.assertIsInstance(transport, objc_asyncio.PyObjCDatagramTransport)
+                self.assertIsInstance(protocol, utils.EchoServerProtocol)
+
+            finally:
+                transport.close()
+
+        self.loop.run_until_complete(main())
+
+    def test_create_datagram_endpoint_basic_family(self):
+        async def main():
+            transport, protocol = await self.loop.create_datagram_endpoint(
+                utils.EchoServerProtocol, family=socket.AF_INET
+            )
+
+            try:
+                self.assertIsInstance(transport, objc_asyncio.PyObjCDatagramTransport)
+                self.assertIsInstance(protocol, utils.EchoServerProtocol)
+
+            finally:
+                transport.close()
+
+        self.loop.run_until_complete(main())
+
+    def test_create_datagram_endpoint_no_info(self):
+        async def main():
+
+            with self.assertRaisesRegex(ValueError, "unexpected address family"):
+                await self.loop.create_datagram_endpoint(utils.EchoServerProtocol)
+
+        self.loop.run_until_complete(main())
+
+    def test_create_datagram_endpoint_reuseaddr_true(self):
+        async def main():
+
+            with self.assertRaisesRegex(ValueError, "significant security concern"):
+                await self.loop.create_datagram_endpoint(
+                    utils.EchoServerProtocol, family=socket.AF_INET, reuse_address=True
+                )
+
+        self.loop.run_until_complete(main())
+
+    def test_create_datagram_endpoint_reuseaddr_false(self):
+        async def main():
+
+            with self.assertWarnsRegex(
+                DeprecationWarning, r"\*reuse_address\* parameter"
+            ):
+                await self.loop.create_datagram_endpoint(
+                    utils.EchoServerProtocol, family=socket.AF_INET, reuse_address=False
+                )
+
+        self.loop.run_until_complete(main())
+
 
 class TestSocketTLS(utils.TestCase):
-    pass
+    def test_create_connection_basic_tls(self):
+        async def main():
+            hostname = "www.nu.nl"
+            context = utils.simple_client_sslcontext()
+            on_connection_lost = self.loop.create_future()
+            transport, protocol = await self.loop.create_connection(
+                lambda: WebClientProtocol(hostname, on_connection_lost),
+                hostname,
+                443,
+                ssl=context,
+            )
+
+            try:
+                data, exc = await on_connection_lost
+
+            finally:
+                transport.close()
+
+            self.assertIs(exc, None)
+            self.assertIn(b"HTTP/1.1 200 OK", data)
+            self.assertIn(b"Het laatste nieuws het eerst op NU.nl", data)
+
+        self.loop.run_until_complete(main())
+
+    def test_create_connection_sock_tls(self):
+        async def main():
+            hostname = "www.nu.nl"
+            sd = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
+            sd.connect((hostname, 443))
+
+            context = utils.simple_client_sslcontext()
+            on_connection_lost = self.loop.create_future()
+            transport, protocol = await self.loop.create_connection(
+                lambda: WebClientProtocol(hostname, on_connection_lost),
+                sock=sd,
+                ssl=context,
+                server_hostname=hostname,
+            )
+
+            try:
+                data, exc = await on_connection_lost
+
+            finally:
+                transport.close()
+
+            self.assertIs(exc, None)
+            self.assertIn(b"HTTP/1.1 200 OK", data)
+            self.assertIn(b"Het laatste nieuws het eerst op NU.nl", data)
+
+        self.loop.run_until_complete(main())
+
+    def test_create_connection_sock_tls_missing_servername(self):
+        async def main():
+            sd = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
+            self.addCleanup(sd.close)
+
+            context = utils.simple_client_sslcontext()
+            on_connection_lost = self.loop.create_future()
+
+            with self.assertRaisesRegex(ValueError, "You must set server_hostname"):
+                await self.loop.create_connection(
+                    lambda: WebClientProtocol("www.nu.nl", on_connection_lost),
+                    sock=sd,
+                    ssl=context,
+                )
+
+        self.loop.run_until_complete(main())
+
+    def test_create_server_ssl_bool(self):
+        async def main():
+            with self.assertRaisesRegex(TypeError, "ssl argument must be"):
+                await self.loop.create_server(
+                    utils.EchoServerProtocol, "127.0.0.1", 0, ssl=True
+                )
+
+        self.loop.run_until_complete(main())
+
+    def test_create_server_ssl(self):
+        async def main():
+            context = utils.simple_server_sslcontext()
+            server = await self.loop.create_server(
+                utils.EchoServerProtocol, "127.0.0.1", 0, ssl=context
+            )
+
+            async with server:
+                pass
+
+        self.loop.run_until_complete(main())
 
 
 class SendFileProtocol(asyncio.Protocol):
@@ -2060,3 +2302,21 @@ class EchoClientProtocol(asyncio.Protocol):
 
     def connection_lost(self, exc):
         self.on_connection_lost.set_result(b"".join(self.data))
+
+
+class WebClientProtocol(asyncio.Protocol):
+    def __init__(self, hostname, on_connection_lost):
+        self.hostname = hostname
+        self.data = []
+        self.on_connection_lost = on_connection_lost
+
+    def connection_made(self, transport):
+        transport.write(
+            b"GET / HTTP/1.0\r\nHost: %s\r\n\r\n" % (self.hostname.encode(),)
+        )
+
+    def data_received(self, data):
+        self.data.append(data)
+
+    def connection_lost(self, exc):
+        self.on_connection_lost.set_result((b"".join(self.data), exc))
