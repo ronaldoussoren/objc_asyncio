@@ -30,6 +30,8 @@ Supported platforms
 This package supports Python 3.7 and later on macOS 10.9 or later, it is
 not supported on other platforms like iOS, Windows and Linux.
 
+This package requires a working :mod:`ssl` module.
+
 Basic Usage
 -----------
 
